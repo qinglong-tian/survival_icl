@@ -1,38 +1,44 @@
 # 3-stage survival pretraining curriculum with progressive freezing.
 # All data is generated ON-THE-FLY — zero disk storage per batch.
 #
-# Usage: bash scripts/train_survival_curriculum.sh
+# Usage:
+#   export SURVIVAL_CHECKPOINT_DIR=/path/to/checkpoints
+#   export SURVIVAL_WANDB_DIR=/path/to/wandb
+#   bash scripts/train_survival_curriculum.sh
+#
+# Or override individual settings inline.
 #
 # Prerequisites:
 #   pip install tabicl transformers wandb
-#   export NCCL_DEBUG=WARN
+#   export NCCL_DEBUG=WARN   (for multi-GPU DDP)
 #
 # Freezing scheme:
 #   Stage 1: freeze ColEmbedding + RowInteraction  → train ICL transformer + survival head (~55%)
 #   Stage 2: freeze ColEmbedding + RowInteraction  → train ICL transformer + survival head (~55%)
 #   Stage 3: unfreeze all                           → full fine-tune on large data (~100%)
 #
-# Adjust --nproc_per_node, --checkpoint_dir, --wandb_dir, and paths.
+# Set environment variables or edit defaults below.
+# ---------------------------------------------------------------------------
 
 set -euo pipefail
+
+CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-./checkpoints}"
+WANDB_DIR="${SURVIVAL_WANDB_DIR:-./wandb}"
+NPROC="${NPROC_PER_NODE:-1}"
+
+mkdir -p "${CHECKPOINT_DIR}" "${WANDB_DIR}"
 
 ##############################################################################
 # Proportional Hazard (PH) — 4 baselines (Weibull, Gompertz, LogLogistic, LogNormal)
 ##############################################################################
 
-# ----------------------------------
-# Stage 1 — Small fixed-length datasets
-#   Encoder: TabICL regressor from Hugging Face Hub.
-#   Freeze:  ColEmbedding, RowInteraction.
-#   Train:   ICL transformer + survival head.
-#   α:       cos(3.0 → 0.05) over 100K steps.
-# ----------------------------------
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+# Stage 1: small fixed-length, freeze embeddings, train ICL+head
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-PH-Stage1 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -78,23 +84,17 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --norm_first True \
     --freeze_col True \
     --freeze_row True \
-    --checkpoint_dir /path/to/checkpoints/survival_ph_stage1 \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_ph_stage1" \
     --save_temp_every 50 \
     --save_perm_every 5000
 
-# ----------------------------------
-# Stage 2 — Medium variable-length datasets
-#   Encoder: Stage 1 checkpoint (survival head weights carried forward).
-#   Freeze:  ColEmbedding, RowInteraction.
-#   Train:   ICL transformer + survival head.
-#   α:       cos(3.0 → 0.05) over 2K steps.
-# ----------------------------------
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+# Stage 2: variable-length, freeze embeddings, load Stage 1 weights
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-PH-Stage2 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -143,23 +143,18 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --norm_first True \
     --freeze_col True \
     --freeze_row True \
-    --pretrained_path /path/to/checkpoints/survival_ph_stage1/step-100000.ckpt \
-    --checkpoint_dir /path/to/checkpoints/survival_ph_stage2 \
+    --pretrained_path "${CHECKPOINT_DIR}/survival_ph_stage1/step-100000.ckpt" \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_ph_stage2" \
     --save_temp_every 50 \
     --save_perm_every 500
 
-# ----------------------------------
-# Stage 3 — Large variable-length datasets
-#   Encoder: Stage 2 checkpoint.
-#   Unfreeze all. Full fine-tune.
-#   α:       cos(3.0 → 0.05) over 50 steps.
-# ----------------------------------
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+# Stage 3: large variable-length, unfreeze all, full fine-tune
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-PH-Stage3 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -207,8 +202,8 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --icl_nhead 4 \
     --ff_factor 2 \
     --norm_first True \
-    --pretrained_path /path/to/checkpoints/survival_ph_stage2/step-2000.ckpt \
-    --checkpoint_dir /path/to/checkpoints/survival_ph_stage3 \
+    --pretrained_path "${CHECKPOINT_DIR}/survival_ph_stage2/step-2000.ckpt" \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_ph_stage3" \
     --save_temp_every 10 \
     --save_perm_every 10
 
@@ -218,12 +213,12 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
 ##############################################################################
 
 # Stage 1
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-AFT-Stage1 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -269,17 +264,17 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --norm_first True \
     --freeze_col True \
     --freeze_row True \
-    --checkpoint_dir /path/to/checkpoints/survival_aft_stage1 \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_aft_stage1" \
     --save_temp_every 50 \
     --save_perm_every 5000
 
 # Stage 2
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-AFT-Stage2 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -328,18 +323,18 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --norm_first True \
     --freeze_col True \
     --freeze_row True \
-    --pretrained_path /path/to/checkpoints/survival_aft_stage1/step-100000.ckpt \
-    --checkpoint_dir /path/to/checkpoints/survival_aft_stage2 \
+    --pretrained_path "${CHECKPOINT_DIR}/survival_aft_stage1/step-100000.ckpt" \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_aft_stage2" \
     --save_temp_every 50 \
     --save_perm_every 500
 
 # Stage 3 — Unfreeze all
-torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
+torchrun --standalone --nproc_per_node="${NPROC}" src/tabicl/train/_run.py \
     --task survival \
     --wandb_log True \
     --wandb_project TabICL-Survival \
     --wandb_name Survival-AFT-Stage3 \
-    --wandb_dir /path/to/wandb/dir \
+    --wandb_dir "${WANDB_DIR}" \
     --wandb_mode online \
     --device cuda \
     --dtype float32 \
@@ -387,7 +382,7 @@ torchrun --standalone --nproc_per_node=1 src/tabicl/train/_run.py \
     --icl_nhead 4 \
     --ff_factor 2 \
     --norm_first True \
-    --pretrained_path /path/to/checkpoints/survival_aft_stage2/step-2000.ckpt \
-    --checkpoint_dir /path/to/checkpoints/survival_aft_stage3 \
+    --pretrained_path "${CHECKPOINT_DIR}/survival_aft_stage2/step-2000.ckpt" \
+    --checkpoint_dir "${CHECKPOINT_DIR}/survival_aft_stage3" \
     --save_temp_every 10 \
     --save_perm_every 10

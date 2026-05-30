@@ -448,12 +448,17 @@ class Trainer:
         if self.master_process:
             print(dataset)
 
+        # Use 0 workers on macOS (fork is unsafe with PyTorch loaded),
+        # 1 worker on Linux (enables data prefetching for on-the-fly generation).
+        _num_workers = 0 if "darwin" in os.uname().sysname.lower() else 1
         self.dataloader = DataLoader(
             dataset,
             batch_size=None,
             shuffle=False,
-            num_workers=0,  # avoid fork() segfaults on macOS with PyTorch
-            pin_memory=False,
+            num_workers=_num_workers,
+            prefetch_factor=4 if _num_workers > 0 else None,
+            pin_memory=True if self.config.prior_device == "cpu" else False,
+            pin_memory_device=self.config.device if self.config.prior_device == "cpu" else "",
         )
 
     def configure_binner(self):
@@ -493,13 +498,17 @@ class Trainer:
             print(f"TimeBinner: {self.binner}")
 
     def configure_loss(self):
-        """Set up the hybrid survival loss."""
+        """Set up the hybrid survival loss.
+
+        Alpha schedule starts from ``curr_step`` so that checkpoints
+        resume with the correct decay phase.
+        """
         from tabicl.survival import HybridSurvivalLoss
 
         self.surv_loss_fn = HybridSurvivalLoss(
             alpha_start=getattr(self.config, "alpha_start", 3.0),
             alpha_floor=getattr(self.config, "alpha_floor", 0.05),
-            max_steps=self.config.max_steps,
+            max_steps=self.curr_step + self.config.max_steps,
         )
 
     # ------------------------------------------------------------------

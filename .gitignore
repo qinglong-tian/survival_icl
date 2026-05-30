@@ -4,3 +4,13 @@ __pycache__/
 data/
 test_survival_data/
 *.tmp
+
+# HPC checkpoint and log directories
+checkpoints/
+wandb/
+
+# Test/smoke artifacts (prefixed with _)
+_smoke_*/
+_test_*/
+_ckpts_*/
+_data_*/
