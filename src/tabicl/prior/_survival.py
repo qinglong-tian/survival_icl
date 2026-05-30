@@ -582,7 +582,7 @@ class SurvivalSCMPrior(SCMPrior):
             return False
         y_train = y[:, :train_size]
         y_test = y[:, train_size:]
-        if (y_train.numel() > 0 and y_train.std() < min_std) or (y_test.numel() > 0 and y_test.std() < min_std):
+        if (y_train.numel() > 1 and y_train.std() < min_std) or (y_test.numel() > 1 and y_test.std() < min_std):
             return False
         return True
 

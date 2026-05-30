@@ -474,7 +474,7 @@ class Trainer:
         if not self.ddp or self.master_process:
             t_event_samples = []
             dl_iter = iter(self.dataloader)
-            for _ in range(1):
+            for _ in range(4):
                 try:
                     batch = next(dl_iter)
                     t_event = batch[3]
@@ -496,13 +496,17 @@ class Trainer:
             )
 
         if self.ddp:
-            # Broadcast binner edges + means from rank 0 to all ranks
+            # Broadcast binner edges + means from rank 0 to all ranks.
+            # TimeBinner.from_event_times returns CPU tensors; non-master
+            # ranks allocate on the configured device.  Move rank 0 to
+            # the correct device so NCCL broadcast sees uniform devices.
+            _nb = getattr(self.config, "num_bins", 50)
             if self.master_process:
-                edges = self.binner.bin_edges
-                means = self.binner.bin_means
+                edges = self.binner.bin_edges.to(device=self.config.device)
+                means = self.binner.bin_means.to(device=self.config.device)
             else:
-                edges = torch.zeros(51, device=self.config.device)
-                means = torch.zeros(50, device=self.config.device)
+                edges = torch.zeros(_nb + 1, device=self.config.device)
+                means = torch.zeros(_nb, device=self.config.device)
 
             from torch.distributed import broadcast
             broadcast(edges, src=0)

@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=h100:2
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=64G
+#SBATCH --mem=16G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -40,7 +40,8 @@ echo "============================================"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export PYTHONUNBUFFERED=1
 export TORCH_NCCL_ASYNC_HANDLING=1
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_NUM_THREADS=$(($SLURM_CPUS_PER_TASK / ${SLURM_GPUS_ON_NODE:-2}))
+export MKL_NUM_THREADS=${OMP_NUM_THREADS}
 
 # ---- modules + venv ----------------------------------------------------
 module --force purge
