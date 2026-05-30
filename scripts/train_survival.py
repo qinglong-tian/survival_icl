@@ -147,23 +147,23 @@ def train(args):
     reg._load_model()
     model = reg.model_
 
-    # ---- Swap decoder with survival head ---------------------------------
+    # ---- Activate survival mode + swap decoder + y_encoder ----------------
     from tabicl.survival import DiscreteTimeSurvivalHead
 
     icl_dim = model.embed_dim * model.row_num_cls
     d_model = icl_dim  # the dimension fed to the decoder
-    survival_head = DiscreteTimeSurvivalHead(d_model=d_model, num_bins=args.num_bins).to(device)
 
-    # Replace the decoder. The upstream decoder is
-    #   nn.Sequential(Linear(d_model, 2*d_model), GELU(), Linear(2*d_model, out_dim))
+    model.survival = True
+    model.icl_predictor.survival = True
+
+    # Replace y_encoder: survival needs Linear(2, d_model) for (t, delta) pairs
+    model.icl_predictor.y_encoder = nn.Linear(2, d_model).to(device)
+    logger.info("Replaced y_encoder with Linear(2, %d) for survival (t, delta) encoding", d_model)
+
+    # Replace the decoder with survival head
+    survival_head = DiscreteTimeSurvivalHead(d_model=d_model, num_bins=args.num_bins).to(device)
     model.icl_predictor.decoder = survival_head
     logger.info("Replaced decoder with DiscreteTimeSurvivalHead(d_model=%d, num_bins=%d)", d_model, args.num_bins)
-
-    # Update out_dim on the ICLearning and InferenceManager so shape checks pass
-    model.icl_predictor.inference_mgr._out_dim = args.num_bins  # type: ignore[attr-defined]
-    # The `out_dim` attribute in ICLearning __init__ is `out_dim` (stored as attribute but not stored).
-    # We just need the model.forward to work — it calls decoder then slices to test.
-    # decoder now outputs (B, T, K) → sliced to (B, test_size, K).  That's fine.
 
     model.train()
     model.to(device)
@@ -276,6 +276,7 @@ def train(args):
 
             # y_train for ICL is t_obs for context samples (the model sees times as labels)
             y_train = t_obs_ds[:, ctx_idx]  # (1, ctx_size)
+            delta_train = delta_ds[:, ctx_idx]  # (1, ctx_size) — event indicator per context sample
 
             # Targets for loss: query samples
             t_obs_qry = t_obs_ds[:, qry_idx].squeeze(0)  # (query_size,)
@@ -285,8 +286,8 @@ def train(args):
             # Concatenate context + query for TabICL.forward
             X_input = torch.cat([X_ctx, X_qry], dim=1)  # (1, ctx_size + query_size, H)
 
-            # Forward pass
-            h_raw = model(X_input, y_train)  # (1, query_size, K)
+            # Forward pass — pass delta_train so y_encoder sees (t, delta) pairs
+            h_raw = model(X_input, y_train, delta_train=delta_train)  # (1, query_size, K)
             h_raw = h_raw.squeeze(0)  # (query_size, K)
 
             # Compute loss

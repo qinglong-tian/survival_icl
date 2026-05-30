@@ -68,6 +68,11 @@ class ICLearning(nn.Module):
 
     recompute : bool, default=False
         If True, uses gradient checkpointing to save memory at the cost of additional computation.
+
+    survival : bool, default=False
+        If True, the y_encoder accepts ``(t, delta)`` pairs (2D input) for
+        survival analysis, where delta=1 for observed events and delta=0 for
+        censored observations.
     """
 
     def __init__(
@@ -84,10 +89,12 @@ class ICLearning(nn.Module):
         bias_free_ln: bool = False,
         ssmax: Union[bool, str] = False,
         recompute: bool = False,
+        survival: bool = False,
     ):
         super().__init__()
 
         self.max_classes = max_classes
+        self.survival = survival
         self.norm_first = norm_first
 
         self.tf_icl = Encoder(
@@ -105,7 +112,9 @@ class ICLearning(nn.Module):
         if self.norm_first:
             self.ln = nn.LayerNorm(d_model, bias=not bias_free_ln)
 
-        if max_classes > 0:  # Classification
+        if survival:
+            self.y_encoder = nn.Linear(2, d_model)
+        elif max_classes > 0:  # Classification
             self.y_encoder = OneHotAndLinear(max_classes, d_model)
         else:  # Regression
             self.y_encoder = nn.Linear(1, d_model)
@@ -236,7 +245,7 @@ class ICLearning(nn.Module):
         indices = unique_vals.argsort()
         return indices[torch.searchsorted(unique_vals, y)]
 
-    def _icl_predictions(self, R: Tensor, y_train: Tensor) -> Tensor:
+    def _icl_predictions(self, R: Tensor, y_train: Tensor, delta_train: Optional[Tensor] = None) -> Tensor:
         """In-context learning predictions.
 
         Parameters
@@ -250,6 +259,11 @@ class ICLearning(nn.Module):
         y_train : Tensor
             Training targets of shape (B, train_size), where train_size is the position
             to split the input into training and test data.
+            For survival mode: observed times ``t_obs``.
+
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Required when ``self.survival=True``; ignored otherwise.
 
         Returns
         -------
@@ -261,7 +275,12 @@ class ICLearning(nn.Module):
         """
 
         train_size = y_train.shape[1]
-        if self.max_classes > 0:  # Classification
+        if self.survival:
+            assert delta_train is not None, "delta_train must be provided when survival=True"
+            # Stack (t, delta) as a 2D feature per context sample
+            y_feat = torch.stack([y_train, delta_train.float()], dim=-1)  # (B, train_size, 2)
+            Ry_train = self.y_encoder(y_feat)
+        elif self.max_classes > 0:  # Classification
             Ry_train = self.y_encoder(y_train.float())
         else:  # Regression
             Ry_train = self.y_encoder(y_train.unsqueeze(-1))
@@ -487,6 +506,7 @@ class ICLearning(nn.Module):
         self,
         R: Tensor,
         y_train: Tensor,
+        delta_train: Optional[Tensor] = None,
         return_logits: bool = True,
         softmax_temperature: float = 0.9,
         mgr_config: MgrConfig = None,
@@ -504,6 +524,11 @@ class ICLearning(nn.Module):
         y_train : Tensor
             Training targets of shape (B, train_size), where train_size is the position
             to split the input into training and test data.
+            For survival mode: observed times ``t_obs``.
+
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Required when ``self.survival=True``; ignored otherwise.
 
         return_logits : bool, default=True
             If True, return logits instead of probabilities. Used only in inference mode.
@@ -534,7 +559,7 @@ class ICLearning(nn.Module):
 
         if self.training:
             train_size = y_train.shape[1]
-            out = self._icl_predictions(R, y_train)
+            out = self._icl_predictions(R, y_train, delta_train=delta_train)
             out = out[:, train_size:]
         else:
             out = self._inference_forward(R, y_train, return_logits, softmax_temperature, mgr_config)

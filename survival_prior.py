@@ -550,8 +550,16 @@ class LoadSurvivalPriorDataset(IterableDataset):
                     self.buffer_train_sizes = torch.cat([self.buffer_train_sizes, train_sizes], dim=0)
                     self.buffer_size += file_batch_size
             except Exception as e:
-                print(f"Warning: Could not load more files: {str(e)}")
-                break
+                if self.max_batches is not None:
+                    # Finite mode — give up after exhausting all files
+                    print(f"Warning: Could not load more files: {str(e)}")
+                    break
+                else:
+                    # Infinite mode — cycle back to start
+                    if self.current_idx >= self.ddp_rank + 1000000:
+                        print("Warning: cycled past 1M batches; if this is intentional, increase start_from")
+                    self.current_idx = self.ddp_rank
+                    continue
 
         if self.buffer_size == 0:
             raise StopIteration

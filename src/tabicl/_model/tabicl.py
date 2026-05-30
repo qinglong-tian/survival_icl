@@ -188,12 +188,18 @@ class TabICL(nn.Module):
         norm_first: bool = True,
         bias_free_ln: bool = False,
         recompute: bool = False,
+        survival: bool = False,
     ):
         super().__init__()
         icl_dim = embed_dim * row_num_cls  # CLS tokens are concatenated for ICL
 
+        self.survival = survival
+
         # Determine task type
-        if max_classes == 0:  # Regression
+        if survival:
+            out_dim = num_quantiles  # placeholder; decoder is replaced at runtime
+            self.quantile_dist = None
+        elif max_classes == 0:  # Regression
             if num_quantiles <= 0:
                 raise ValueError("For regression (max_classes=0), num_quantiles must be greater than 0.")
             out_dim = num_quantiles
@@ -274,6 +280,7 @@ class TabICL(nn.Module):
             bias_free_ln=bias_free_ln,
             ssmax=icl_ssmax,
             recompute=recompute,
+            survival=survival,
         )
 
         # KV cache for efficient inference
@@ -289,7 +296,8 @@ class TabICL(nn.Module):
         self._cache = None
 
     def _train_forward(
-        self, X: Tensor, y_train: Tensor, d: Optional[Tensor] = None, embed_with_test: bool = False
+        self, X: Tensor, y_train: Tensor, d: Optional[Tensor] = None,
+        embed_with_test: bool = False, delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """Column-wise embedding -> row-wise interaction -> dataset-wise in-context learning for training.
 
@@ -305,13 +313,18 @@ class TabICL(nn.Module):
         y_train : Tensor
             Training labels of shape (B, train_size) where:
              - B is the number of tables
-             - train_size is the number of training samples provided for in-context learning
+             - train_size is the number of training samples provided for in-context learning.
+            For survival mode: observed times ``t_obs``.
 
         d : Optional[Tensor], default=None
             The number of features per dataset.
 
         embed_with_test : bool, default=False
             If True, allow training samples to attend to test samples during embedding.
+
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Passed through to ICLearning when ``self.survival=True``.
 
         Returns
         -------
@@ -342,7 +355,7 @@ class TabICL(nn.Module):
         )
 
         # Dataset-wise in-context learning
-        return self.icl_predictor(representations, y_train=y_train)
+        return self.icl_predictor(representations, y_train=y_train, delta_train=delta_train)
 
     def _inference_forward(
         self,
@@ -437,6 +450,7 @@ class TabICL(nn.Module):
         return_logits: bool = True,
         softmax_temperature: float = 0.9,
         inference_config: Optional[InferenceConfig] = None,
+        delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """Column-wise embedding -> row-wise interaction -> dataset-wise in-context learning.
 
@@ -474,6 +488,10 @@ class TabICL(nn.Module):
         inference_config : Optional[InferenceConfig], default=None
             Inference configuration. Used only in inference mode.
 
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Passed through to :meth:`~tabicl._model.learning.ICLearning._icl_predictions`.
+
         Returns
         -------
         Tensor
@@ -493,7 +511,7 @@ class TabICL(nn.Module):
         """
 
         if self.training:
-            out = self._train_forward(X, y_train, d=d, embed_with_test=embed_with_test)
+            out = self._train_forward(X, y_train, d=d, embed_with_test=embed_with_test, delta_train=delta_train)
         else:
             out = self._inference_forward(
                 X,

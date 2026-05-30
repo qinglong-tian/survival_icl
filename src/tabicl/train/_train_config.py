@@ -203,6 +203,42 @@ def build_parser():
     )
 
     ###########################################################################
+    ###### Task Config #########################################################
+    ###########################################################################
+    parser.add_argument(
+        "--task", type=str, default="classification", choices=["classification", "survival"],
+        help="Training task: classification (standard TabICL) or survival (time-to-event)."
+    )
+
+    ###########################################################################
+    ###### Survival Config ####################################################
+    ###########################################################################
+    parser.add_argument("--num_bins", type=int, default=50, help="[Survival] Number of discrete time bins K")
+    parser.add_argument("--alpha_start", type=float, default=3.0, help="[Survival] Initial imputation loss weight")
+    parser.add_argument("--alpha_floor", type=float, default=0.05, help="[Survival] Final imputation loss weight after cosine decay")
+    parser.add_argument(
+        "--survival_model_type", type=str, default="ph", choices=["ph", "aft"],
+        help="[Survival] PH = proportional hazard, AFT = accelerated failure time"
+    )
+    parser.add_argument("--survival_beta", type=float, default=1.0, help="[Survival] Effect size multiplier beta")
+    parser.add_argument(
+        "--baseline_types", type=str, default="weibull,gompertz,loglogistic,lognormal",
+        help="[Survival] Comma-separated baseline hazard names"
+    )
+    parser.add_argument(
+        "--baseline_mode", type=str, default="mix",
+        help="[Survival] 'mix' randomly selects baseline per dataset, or a fixed name like 'weibull'"
+    )
+    parser.add_argument("--min_censor_scale", type=float, default=1.0, help="[Survival] Minimum censoring scale factor")
+    parser.add_argument("--max_censor_scale", type=float, default=5.0, help="[Survival] Maximum censoring scale factor")
+    parser.add_argument("--min_event_rate", type=float, default=0.40, help="[Survival] Minimum event rate per dataset")
+    parser.add_argument("--max_event_rate", type=float, default=1.0, help="[Survival] Maximum event rate per dataset")
+    parser.add_argument(
+        "--pretrained_path", type=str, default=None,
+        help="[Survival] Path to pretrained TabICL checkpoint for encoder initialization (HF Hub if None)"
+    )
+
+    ###########################################################################
     ###### Checkpointing ######################################################
     ###########################################################################
     parser.add_argument("--checkpoint_dir", default=None, type=str, help="Directory for checkpoint saving and loading")
