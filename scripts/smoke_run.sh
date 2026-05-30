@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
 #SBATCH --time=00:30:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 #SBATCH --signal=TERM@120
 #SBATCH --mail-user=qltian2021@gmail.com
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
@@ -53,7 +53,7 @@ source ~/venvs/icl/bin/activate
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-}"
 if [[ -z "$REPO_DIR" ]]; then
-    for CANDIDATE in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$SCRIPT_DIR"; do
+    for CANDIDATE in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$SCRIPT_DIR" "$SCRIPT_DIR/.."; do
         [[ -z "${CANDIDATE:-}" ]] && continue
         if [[ -f "$CANDIDATE/survival_prior.py" ]]; then
             REPO_DIR="$CANDIDATE"
@@ -75,7 +75,6 @@ echo "Repo dir:    ${REPO_DIR}"
 pip install -e . --quiet 2>&1 | tail -2
 
 # ---- directories -------------------------------------------------------
-mkdir -p logs
 RUN_DIR="/scratch/${USER}/survival-smoke-${SLURM_JOB_ID}"
 CKPT_DIR="${RUN_DIR}/checkpoints"
 mkdir -p "$CKPT_DIR"
@@ -191,4 +190,4 @@ echo "Checkpoints:"
 ls -lh "${CKPT_DIR}/" 2>/dev/null || echo "(no checkpoints)"
 echo "============================================"
 
-echo "Smoke test complete.  Check logs/$SLURM_JOB_ID.out for loss trend."
+echo "Smoke test complete.  Check survsmoke-${SLURM_JOB_ID}.out for loss trend."
