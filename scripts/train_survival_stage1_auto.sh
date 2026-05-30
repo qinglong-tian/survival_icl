@@ -17,6 +17,7 @@
 # Stage 1 PH Survival Pretraining — Auto-Resuming Chunked HPC Job
 #
 # Default: 10% partial run (10,000 steps).  Override via sbatch --export.
+# Run label is derived automatically from STAGE1_TARGET_STEPS.
 #
 # Config (override via env / sbatch --export=ALL,...):
 #   STAGE1_TARGET_STEPS=10000
@@ -43,12 +44,21 @@ export STAGE1_TARGET_STEPS
 export STAGE1_CHUNK_STEPS
 export STAGE1_TIME
 
+# Derive a human-readable label from STAGE1_TARGET_STEPS
+if (( STAGE1_TARGET_STEPS == 10000 )); then
+    STAGE1_RUN_LABEL="10% partial run"
+elif (( STAGE1_TARGET_STEPS == 100000 )); then
+    STAGE1_RUN_LABEL="full Stage 1 run"
+else
+    STAGE1_RUN_LABEL="custom Stage 1 run (target=${STAGE1_TARGET_STEPS})"
+fi
+
 CKPT_DIR="${SURVIVAL_CHECKPOINT_DIR}/checkpoints"
 OUTFILE="logs/surv-s1-${SLURM_JOB_ID}.out"
 ERRFILE="logs/surv-s1-${SLURM_JOB_ID}.err"
 
 echo "============================================"
-echo "Stage 1 PH Survival — 10% Partial Run"
+echo "Stage 1 PH Survival — ${STAGE1_RUN_LABEL}"
 echo "Job ID:       ${SLURM_JOB_ID}"
 echo "Node:         $(hostname)"
 echo "GPUs:         ${SLURM_GPUS_ON_NODE:-?}"
@@ -257,7 +267,7 @@ fi
 if (( FOUND_STEP >= STAGE1_TARGET_STEPS )); then
     echo ""
     echo "============================================"
-    echo "10% Stage 1 partial run complete — reached step ${FOUND_STEP}"
+    echo "${STAGE1_RUN_LABEL} complete — reached step ${FOUND_STEP}"
     echo "Final checkpoint: ${CKPT_DIR}/step-${FOUND_STEP}.ckpt"
     echo "============================================"
     exit 0

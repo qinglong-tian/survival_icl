@@ -288,8 +288,9 @@ plot_shap(shap_values)
 ## Pre-training
 
 Pre-training code (including synthetic data generation) is currently available for the v1 model. 
-The scripts folder provides the commands for [stage 1](./scripts/train_stage1.sh), [stage 2](./scripts/train_stage2.sh), 
-and [stage 3](./scripts/train_stage3.sh) of curriculum learning.
+The scripts folder provides the upstream/original TabICL v1 curriculum commands in [`scripts/_upstream/`](./scripts/_upstream/):
+[stage 1](./scripts/_upstream/train_stage1.sh), [stage 2](./scripts/_upstream/train_stage2.sh),
+and [stage 3](./scripts/_upstream/train_stage3.sh).
 Pre-training code for v2 will be released upon publication.
 
 ## Nanotabicl: a minimal architecture implementation
