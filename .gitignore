@@ -8,6 +8,10 @@ test_survival_data/
 # HPC checkpoint and log directories
 checkpoints/
 wandb/
+logs/
+
+# Debug / temp scripts (not tracked)
+debug_nan.py
 
 # Test/smoke artifacts (prefixed with _)
 _smoke_*/
