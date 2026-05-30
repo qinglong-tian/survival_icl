@@ -448,50 +448,69 @@ class Trainer:
         if self.master_process:
             print(dataset)
 
-        # Use 0 workers on macOS (fork is unsafe with PyTorch loaded),
-        # 1 worker on Linux (enables data prefetching for on-the-fly generation).
-        _num_workers = 0 if "darwin" in os.uname().sysname.lower() else 1
+        # num_workers=0: fork is unsafe with PyTorch+CUDA loaded on any platform.
+        # On-the-fly data generation runs synchronously in the main process.
+        # This is fast enough for CPU-side SCM generation (<< GPU compute time).
         self.dataloader = DataLoader(
             dataset,
             batch_size=None,
             shuffle=False,
-            num_workers=_num_workers,
-            prefetch_factor=4 if _num_workers > 0 else None,
-            pin_memory=True if self.config.prior_device == "cpu" else False,
-            pin_memory_device=self.config.device if self.config.prior_device == "cpu" else "",
+            num_workers=0,
+            pin_memory=False,
         )
 
     def configure_binner(self):
-        """Build a TimeBinner from a sample of generated survival data."""
+        """Build a TimeBinner from one batch of survival data.
+
+        Under DDP, only rank 0 samples data and broadcasts the bin
+        edges + means to all ranks.  This avoids redundant CPU generation
+        on every GPU.
+        """
         from tabicl.survival import TimeBinner
 
         if self.master_process:
             print("Building TimeBinner from data sample...")
 
-        t_event_samples = []
-        dl_iter = iter(self.dataloader)
-        for _ in range(4):
-            try:
-                batch = next(dl_iter)
-                # Survival batch: (X, t, delta, t_event, d, seq_lens, train_sizes)
-                t_event = batch[3]
-                # Handle nested tensors (seq_len_per_gp=True).
-                # Use padding=-1 to avoid contaminating quantile bins with zeros
-                # (real event times are always > 0).
-                if t_event.is_nested:
-                    t_event = t_event.to_padded_tensor(padding=-1.0)
-                t_flat = t_event.reshape(-1)
-                t_flat = t_flat[t_flat > 0]  # exclude padding
-                if t_flat.numel() > 0:
-                    t_event_samples.append(t_flat)
-            except StopIteration:
-                break
+        if not self.ddp or self.master_process:
+            t_event_samples = []
+            dl_iter = iter(self.dataloader)
+            for _ in range(1):
+                try:
+                    batch = next(dl_iter)
+                    t_event = batch[3]
+                    if t_event.is_nested:
+                        t_event = t_event.to_padded_tensor(padding=-1.0)
+                    t_flat = t_event.reshape(-1)
+                    t_flat = t_flat[t_flat > 0]
+                    if t_flat.numel() > 0:
+                        t_event_samples.append(t_flat)
+                except StopIteration:
+                    break
 
-        if not t_event_samples:
-            raise RuntimeError("Could not sample any survival batches for TimeBinner.")
+            if not t_event_samples:
+                raise RuntimeError("Could not sample any survival batches for TimeBinner.")
 
-        all_t_event = torch.cat(t_event_samples)
-        self.binner = TimeBinner.from_event_times(all_t_event, num_bins=getattr(self.config, "num_bins", 50))
+            all_t_event = torch.cat(t_event_samples)
+            self.binner = TimeBinner.from_event_times(
+                all_t_event, num_bins=getattr(self.config, "num_bins", 50),
+            )
+
+        if self.ddp:
+            # Broadcast binner edges + means from rank 0 to all ranks
+            if self.master_process:
+                edges = self.binner.bin_edges
+                means = self.binner.bin_means
+            else:
+                edges = torch.zeros(51, device=self.config.device)
+                means = torch.zeros(50, device=self.config.device)
+
+            from torch.distributed import broadcast
+            broadcast(edges, src=0)
+            broadcast(means, src=0)
+
+            if not self.master_process:
+                self.binner = TimeBinner(bin_edges=edges, bin_means=means)
+
         self.binner = self.binner.to(torch.device(self.config.device))
 
         if self.master_process:
