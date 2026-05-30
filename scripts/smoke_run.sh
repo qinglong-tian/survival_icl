@@ -88,7 +88,8 @@ print(f'PyTorch {torch.__version__}  CUDA {torch.version.cuda}')
 print(f'Visible GPUs:   {torch.cuda.device_count()}')
 for i in range(torch.cuda.device_count()):
     props = torch.cuda.get_device_properties(i)
-    print(f'  GPU {i}: {props.name} ({props.total_mem / 1e9:.1f} GB)')
+    mem_gb = getattr(props, 'total_memory', getattr(props, 'total_mem', 0)) / 1e9
+    print(f'  GPU {i}: {props.name} ({mem_gb:.1f} GB)')
 "
 
 echo ""

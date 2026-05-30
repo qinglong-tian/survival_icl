@@ -7,7 +7,10 @@ from torch import nn
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
-from xgboost import XGBRegressor
+try:
+    from xgboost import XGBRegressor
+except ImportError:
+    XGBRegressor = None
 
 from ._utils import GaussianNoise, XSampler
 
@@ -59,6 +62,11 @@ class TreeLayer(nn.Module):
                 RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth), n_jobs=-1
             )
         elif tree_model == "xgboost":
+            if XGBRegressor is None:
+                raise ImportError(
+                    "xgboost is required for TreeSCM with 'xgboost' tree_model. "
+                    "Install it with 'pip install xgboost', or use --prior_type mlp_scm."
+                )
             self.model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
