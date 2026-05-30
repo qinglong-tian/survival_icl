@@ -16,13 +16,16 @@
 # ==========================================================================
 # Stage 1 PH Survival Pretraining — Auto-Resuming Chunked HPC Job
 #
-# Config (override via env/sbatch --export):
-#   STAGE1_TARGET_STEPS=100000
-#   STAGE1_CHUNK_STEPS=1000        (~6h @ ~20s/step with micro_batch=4)
+# Default: 10% partial run (10,000 steps).  Override via sbatch --export.
+#
+# Config (override via env / sbatch --export=ALL,...):
+#   STAGE1_TARGET_STEPS=10000
+#   STAGE1_CHUNK_STEPS=800         (~4.5h @ ~20s/step with micro_batch=4)
+#   STAGE1_TIME=06:00:00           (per-chunk walltime; ~1.5h buffer)
 #   SURVIVAL_CHECKPOINT_DIR=/scratch/$USER/survival-stage1
 #
-# After observing real timing, you can raise CHUNK_STEPS to 2000 and
-# walltime to 12:00:00 via sbatch --time=12:00:00 --export=STAGE1_CHUNK_STEPS=2000.
+# To run the full 100K-step Stage 1, launch with:
+#   sbatch --time=08:00:00 --export=ALL,STAGE1_TARGET_STEPS=100000,STAGE1_CHUNK_STEPS=1000,STAGE1_TIME=08:00:00
 #
 # Each job trains STAGE1_CHUNK_STEPS then resubmits itself.
 # Last chunk auto-stops at STAGE1_TARGET_STEPS.
@@ -31,25 +34,28 @@
 set -euo pipefail
 
 # ---- tunables ----------------------------------------------------------
-STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
-STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-1000}"
+STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-10000}"
+STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-800}"
+STAGE1_TIME="${STAGE1_TIME:-06:00:00}"
 SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-stage1}"
 export SURVIVAL_CHECKPOINT_DIR  # so resubmitted jobs inherit it
 export STAGE1_TARGET_STEPS
 export STAGE1_CHUNK_STEPS
+export STAGE1_TIME
 
 CKPT_DIR="${SURVIVAL_CHECKPOINT_DIR}/checkpoints"
 OUTFILE="logs/surv-s1-${SLURM_JOB_ID}.out"
 ERRFILE="logs/surv-s1-${SLURM_JOB_ID}.err"
 
 echo "============================================"
-echo "Stage 1 PH Survival — Auto Chunk"
+echo "Stage 1 PH Survival — 10% Partial Run"
 echo "Job ID:       ${SLURM_JOB_ID}"
 echo "Node:         $(hostname)"
 echo "GPUs:         ${SLURM_GPUS_ON_NODE:-?}"
 echo "CPU/task:     ${SLURM_CPUS_PER_TASK:-?}"
 echo "Target steps: ${STAGE1_TARGET_STEPS}"
 echo "Chunk steps:  ${STAGE1_CHUNK_STEPS}"
+echo "Chunk time:   ${STAGE1_TIME}"
 echo "Checkpoints:  ${CKPT_DIR}"
 echo "============================================"
 
@@ -241,9 +247,9 @@ fi
 
 echo "Highest checkpoint after run: step-${FOUND_STEP}"
 
-if (( FOUND_STEP < CURRENT_STEP + STAGE1_CHUNK_STEPS / 2 )); then
-    echo "WARNING: Checkpoint progressed only ${FOUND_STEP} out of expected ${NEXT_MAX}."
-    echo "Will NOT resubmit — check logs."
+if (( FOUND_STEP < NEXT_MAX )); then
+    echo "ERROR: Expected checkpoint at step ${NEXT_MAX}, found step-${FOUND_STEP}.ckpt." >&2
+    echo "Will NOT resubmit — incomplete chunk. Check ${ERRFILE} for details." >&2
     exit 1
 fi
 
@@ -251,17 +257,18 @@ fi
 if (( FOUND_STEP >= STAGE1_TARGET_STEPS )); then
     echo ""
     echo "============================================"
-    echo "STAGE 1 COMPLETE — reached step ${FOUND_STEP} >= ${STAGE1_TARGET_STEPS}"
+    echo "10% Stage 1 partial run complete — reached step ${FOUND_STEP}"
     echo "Final checkpoint: ${CKPT_DIR}/step-${FOUND_STEP}.ckpt"
     echo "============================================"
     exit 0
 fi
 
-# Resubmit self — explicitly export env so the next chunk inherits
-# the same config regardless of cluster default export behaviour.
+# Resubmit self — explicitly export env + walltime so the next chunk
+# inherits the same config regardless of cluster default export behaviour.
 THIS_SCRIPT="${BASH_SOURCE[0]}"
 NEXT_JOB_ID=$(sbatch --parsable \
-    --export="ALL,SURVIVAL_CHECKPOINT_DIR=${SURVIVAL_CHECKPOINT_DIR},STAGE1_TARGET_STEPS=${STAGE1_TARGET_STEPS},STAGE1_CHUNK_STEPS=${STAGE1_CHUNK_STEPS}" \
+    --time="${STAGE1_TIME}" \
+    --export="ALL,SURVIVAL_CHECKPOINT_DIR=${SURVIVAL_CHECKPOINT_DIR},STAGE1_TARGET_STEPS=${STAGE1_TARGET_STEPS},STAGE1_CHUNK_STEPS=${STAGE1_CHUNK_STEPS},STAGE1_TIME=${STAGE1_TIME}" \
     "$THIS_SCRIPT")
 echo ""
 echo "============================================"
