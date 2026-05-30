@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-node=h100:2
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
-#SBATCH --time=24:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --signal=TERM@120
@@ -16,10 +16,13 @@
 # ==========================================================================
 # Stage 1 PH Survival Pretraining — Auto-Resuming Chunked HPC Job
 #
-# Config:
-#   STAGE1_TARGET_STEPS=100000   (override via env/sbatch)
-#   STAGE1_CHUNK_STEPS=5000
+# Config (override via env/sbatch --export):
+#   STAGE1_TARGET_STEPS=100000
+#   STAGE1_CHUNK_STEPS=1000        (~6h @ ~20s/step with micro_batch=4)
 #   SURVIVAL_CHECKPOINT_DIR=/scratch/$USER/survival-stage1
+#
+# After observing real timing, you can raise CHUNK_STEPS to 2000 and
+# walltime to 12:00:00 via sbatch --time=12:00:00 --export=STAGE1_CHUNK_STEPS=2000.
 #
 # Each job trains STAGE1_CHUNK_STEPS then resubmits itself.
 # Last chunk auto-stops at STAGE1_TARGET_STEPS.
@@ -29,7 +32,7 @@ set -euo pipefail
 
 # ---- tunables ----------------------------------------------------------
 STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
-STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-5000}"
+STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-1000}"
 SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-stage1}"
 export SURVIVAL_CHECKPOINT_DIR  # so resubmitted jobs inherit it
 export STAGE1_TARGET_STEPS
@@ -154,6 +157,9 @@ echo "Checkpoints: ${CKPT_DIR}"
 echo "============================================"
 echo ""
 
+# Disable set -e around torchrun so we can capture exit code for
+# the failure/resubmit logic below.  Restore immediately after.
+set +e
 torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" \
     src/tabicl/train/_run.py \
     --task survival \
@@ -208,6 +214,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --wandb_log False
 
 EXIT_CODE=$?
+set -e
 
 echo ""
 echo "--- Training exited with code ${EXIT_CODE} ---"
@@ -250,9 +257,12 @@ if (( FOUND_STEP >= STAGE1_TARGET_STEPS )); then
     exit 0
 fi
 
-# Resubmit self
+# Resubmit self — explicitly export env so the next chunk inherits
+# the same config regardless of cluster default export behaviour.
 THIS_SCRIPT="${BASH_SOURCE[0]}"
-NEXT_JOB_ID=$(sbatch --parsable "$THIS_SCRIPT")
+NEXT_JOB_ID=$(sbatch --parsable \
+    --export="ALL,SURVIVAL_CHECKPOINT_DIR=${SURVIVAL_CHECKPOINT_DIR},STAGE1_TARGET_STEPS=${STAGE1_TARGET_STEPS},STAGE1_CHUNK_STEPS=${STAGE1_CHUNK_STEPS}" \
+    "$THIS_SCRIPT")
 echo ""
 echo "============================================"
 echo "Chunk complete (step ${FOUND_STEP}/${STAGE1_TARGET_STEPS})."
