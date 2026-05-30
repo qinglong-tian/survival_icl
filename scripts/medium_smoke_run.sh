@@ -180,20 +180,56 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --save_perm_every 100 \
     --wandb_log False
 
-# ---- verify checkpoints ------------------------------------------------
+# ---- verify gates ------------------------------------------------------
+set +e  # don't exit on gate failure — print diagnosis first
+FAILED=0
+OUTFILE="logs/survmedium-${SLURM_JOB_ID}.out"
+ERRFILE="logs/survmedium-${SLURM_JOB_ID}.err"
+
 echo ""
 echo "============================================"
+echo "Gate checks"
+echo "============================================"
+
+# Gate 1: checkpoints exist
+for step in 100 200 300; do
+    if [[ -f "${CKPT_DIR}/step-${step}.ckpt" ]]; then
+        echo "  [PASS] step-${step}.ckpt"
+    else
+        echo "  [FAIL] step-${step}.ckpt missing"
+        FAILED=1
+    fi
+done
+
+# Gate 2: no NaN/inf in loss lines
+if grep -E 'surv_nll|impute' "${OUTFILE}" | grep -qE '\bnan\b|\binf\b'; then
+    echo "  [FAIL] NaN/inf found in loss output"
+    grep -nE 'surv_nll.*nan|impute.*nan|surv_nll.*inf|impute.*inf' "${OUTFILE}" || true
+    FAILED=1
+else
+    echo "  [PASS] surv_nll + impute finite"
+fi
+
+# Gate 3: checkpoints verified
+echo ""
 echo "Checkpoints:"
 ls -lh "${CKPT_DIR}/" 2>/dev/null || echo "(no checkpoints)"
 echo "============================================"
 
+if [[ $FAILED -ne 0 ]]; then
+    echo ""
+    echo "=== MEDIUM SMOKE: FAILED ($FAILED gate(s) failed) ==="
+    echo "Output:     ${OUTFILE}"
+    echo "Errors:     ${ERRFILE}"
+    exit 1
+fi
+
 echo ""
 echo "=== Medium smoke test complete ==="
-echo "Output:     logs/survmedium-${SLURM_JOB_ID}.out"
-echo "Errors:     logs/survmedium-${SLURM_JOB_ID}.err"
+echo "Output:     ${OUTFILE}"
+echo "Errors:     ${ERRFILE}"
 echo "Checkpoints: ${CKPT_DIR}/"
 echo ""
-echo "Verify:"
-echo "  ls -lh ${CKPT_DIR}/"
-echo "  grep -E 'surv_nll|impute|alpha' logs/survmedium-${SLURM_JOB_ID}.out | tail -20"
-echo "  grep -iE 'traceback|RuntimeError|ChildFailedError|nan|inf' logs/survmedium-${SLURM_JOB_ID}.err"
+echo "Manual deep-dive:"
+echo "  grep -E 'surv_nll|impute|alpha' ${OUTFILE} | tail -20"
+echo "  grep -iE 'traceback|RuntimeError|ChildFailedError|nan|inf' ${ERRFILE}"

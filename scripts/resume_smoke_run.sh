@@ -109,6 +109,17 @@ from tabicl.survival import TimeBinner, DiscreteTimeSurvivalHead, HybridSurvival
 print('All imports OK')
 "
 
+# ---- pre-download TabICL checkpoint ------------------------------------
+echo ""
+echo "--- Pre-downloading TabICL regressor checkpoint ---"
+python -c "
+from tabicl._sklearn.regressor import TabICLRegressor
+r = TabICLRegressor(n_estimators=1, model_path=None, allow_auto_download=True, device='cpu')
+r._resolve_device()
+r._load_model()
+print('Checkpoint cached')
+"
+
 # ---- training ----------------------------------------------------------
 NPROC="${SLURM_GPUS_ON_NODE:-2}"
 MASTER_PORT="${MASTER_PORT:-29500}"
