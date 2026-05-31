@@ -528,10 +528,13 @@ class Trainer:
         """
         from tabicl.survival import HybridSurvivalLoss
 
+        alpha_horizon = getattr(self.config, "alpha_total_steps", None)
+        if alpha_horizon is None:
+            alpha_horizon = self.curr_step + self.config.max_steps
         self.surv_loss_fn = HybridSurvivalLoss(
             alpha_start=getattr(self.config, "alpha_start", 3.0),
             alpha_floor=getattr(self.config, "alpha_floor", 0.05),
-            max_steps=self.curr_step + self.config.max_steps,
+            max_steps=alpha_horizon,
         )
 
     # ------------------------------------------------------------------

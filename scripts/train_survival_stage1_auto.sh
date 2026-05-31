@@ -210,6 +210,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --num_bins 50 \
     --alpha_start 3.0 \
     --alpha_floor 0.05 \
+    --alpha_total_steps "${STAGE1_TARGET_STEPS}" \
     --embed_dim 128 \
     --col_num_blocks 3 \
     --col_nhead 4 \

@@ -217,6 +217,13 @@ def build_parser():
     parser.add_argument("--alpha_start", type=float, default=3.0, help="[Survival] Initial imputation loss weight")
     parser.add_argument("--alpha_floor", type=float, default=0.05, help="[Survival] Final imputation loss weight after cosine decay")
     parser.add_argument(
+        "--alpha_total_steps", type=int, default=None,
+        help="[Survival] Global step horizon for alpha cosine decay. "
+             "When None, decays over (curr_step + max_steps). "
+             "Set to STAGE1_TARGET_STEPS in chunked training so alpha spans the full "
+             "curriculum rather than restarting per chunk."
+    )
+    parser.add_argument(
         "--survival_model_type", type=str, default="ph", choices=["ph", "aft"],
         help="[Survival] PH = proportional hazard, AFT = accelerated failure time"
     )
