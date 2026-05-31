@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-node=h100:2
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --signal=TERM@120
@@ -16,17 +16,17 @@
 # ==========================================================================
 # Stage 1 PH Survival Pretraining — Auto-Resuming Chunked HPC Job
 #
-# Default: 10% partial run (10,000 steps).  Override via sbatch --export.
+# Default: full Stage 1 run (100,000 steps).  Override via sbatch --export.
 # Run label is derived automatically from STAGE1_TARGET_STEPS.
 #
 # Config (override via env / sbatch --export=ALL,...):
-#   STAGE1_TARGET_STEPS=10000
-#   STAGE1_CHUNK_STEPS=800         (~4.5h @ ~20s/step with micro_batch=4)
-#   STAGE1_TIME=06:00:00           (per-chunk walltime; ~1.5h buffer)
+#   STAGE1_TARGET_STEPS=100000
+#   STAGE1_CHUNK_STEPS=1000        (~5.5h @ ~20s/step with micro_batch=4)
+#   STAGE1_TIME=08:00:00           (per-chunk walltime; ~2.5h buffer)
 #   SURVIVAL_CHECKPOINT_DIR=/scratch/$USER/survival-stage1
 #
-# To run the full 100K-step Stage 1, launch with:
-#   sbatch --time=08:00:00 --export=ALL,STAGE1_TARGET_STEPS=100000,STAGE1_CHUNK_STEPS=1000,STAGE1_TIME=08:00:00
+# For a 10% partial run (10K steps), launch with:
+#   sbatch --time=06:00:00 --export=ALL,STAGE1_TARGET_STEPS=10000,STAGE1_CHUNK_STEPS=800,STAGE1_TIME=06:00:00
 #
 # Each job trains STAGE1_CHUNK_STEPS then resubmits itself.
 # Last chunk auto-stops at STAGE1_TARGET_STEPS.
@@ -35,9 +35,9 @@
 set -euo pipefail
 
 # ---- tunables ----------------------------------------------------------
-STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-10000}"
-STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-800}"
-STAGE1_TIME="${STAGE1_TIME:-06:00:00}"
+STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
+STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-1000}"
+STAGE1_TIME="${STAGE1_TIME:-08:00:00}"
 SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-stage1}"
 export SURVIVAL_CHECKPOINT_DIR  # so resubmitted jobs inherit it
 export STAGE1_TARGET_STEPS
@@ -82,6 +82,8 @@ module load StdEnv/2023 python/3.10.13
 source ~/venvs/icl/bin/activate
 
 # ---- project setup -----------------------------------------------------
+mkdir -p logs
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-}"
 if [[ -z "$REPO_DIR" ]]; then
