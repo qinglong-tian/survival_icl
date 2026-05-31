@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
 #SBATCH --time=08:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 #SBATCH --signal=TERM@120
 #SBATCH --mail-user=qltian2021@gmail.com
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT
@@ -54,8 +54,8 @@ else
 fi
 
 CKPT_DIR="${SURVIVAL_CHECKPOINT_DIR}/checkpoints"
-OUTFILE="logs/surv-s1-${SLURM_JOB_ID}.out"
-ERRFILE="logs/surv-s1-${SLURM_JOB_ID}.err"
+OUTFILE="surv-s1-${SLURM_JOB_ID}.out"
+ERRFILE="surv-s1-${SLURM_JOB_ID}.err"
 
 echo "============================================"
 echo "Stage 1 PH Survival — ${STAGE1_RUN_LABEL}"
@@ -80,9 +80,6 @@ export MKL_NUM_THREADS=${OMP_NUM_THREADS}
 module --force purge
 module load StdEnv/2023 python/3.10.13
 source ~/venvs/icl/bin/activate
-
-# ---- project setup -----------------------------------------------------
-mkdir -p logs
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-}"

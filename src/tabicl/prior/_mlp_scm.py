@@ -11,7 +11,7 @@ from ._utils import GaussianNoise, XSampler
 
 
 class MLPSCM(nn.Module):
-    """Generates synthetic tabular datasets using a Multi-Layer Perceptron (MLP) based Structural Causal Model (SCM).
+    r"""Generates synthetic tabular datasets using a Multi-Layer Perceptron (MLP) based Structural Causal Model (SCM).
 
     Parameters
     ----------

@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 #SBATCH --signal=TERM@120
 #SBATCH --mail-user=qltian2021@gmail.com
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
@@ -183,8 +183,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
 # ---- verify gates ------------------------------------------------------
 set +e  # don't exit on gate failure — print diagnosis first
 FAILED=0
-OUTFILE="logs/survmedium-${SLURM_JOB_ID}.out"
-ERRFILE="logs/survmedium-${SLURM_JOB_ID}.err"
+OUTFILE="survmedium-${SLURM_JOB_ID}.out"
+ERRFILE="survmedium-${SLURM_JOB_ID}.err"
 
 echo ""
 echo "============================================"

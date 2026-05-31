@@ -523,14 +523,16 @@ class Trainer:
     def configure_loss(self):
         """Set up the hybrid survival loss.
 
-        Alpha schedule starts from ``curr_step`` so that checkpoints
-        resume with the correct decay phase.
+        The loss receives global ``curr_step`` values during training, so
+        ``max_steps`` is the absolute decay horizon. Chunked training can
+        override it with ``alpha_total_steps`` to keep the decay horizon
+        independent of the current chunk endpoint.
         """
         from tabicl.survival import HybridSurvivalLoss
 
         alpha_horizon = getattr(self.config, "alpha_total_steps", None)
         if alpha_horizon is None:
-            alpha_horizon = self.curr_step + self.config.max_steps
+            alpha_horizon = self.config.max_steps
         self.surv_loss_fn = HybridSurvivalLoss(
             alpha_start=getattr(self.config, "alpha_start", 3.0),
             alpha_floor=getattr(self.config, "alpha_floor", 0.05),

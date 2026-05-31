@@ -8,7 +8,7 @@ import numpy as np
 
 
 class StdScaleLayer(nn.Module):
-    """Standard scaling layer that normalizes input features.
+    r"""Standard scaling layer that normalizes input features.
 
     Computes mean and standard deviation on the first batch and uses these
     statistics to normalize subsequent inputs using
@@ -52,7 +52,7 @@ class Heaviside(nn.Module):
 
 
 class RBFActivation(nn.Module):
-    """Radial Basis Function (RBF) activation layer.
+    r"""Radial Basis Function (RBF) activation layer.
 
     Implements the Gaussian RBF: :math:`f(x) = \exp(-x^2)`.
     Useful for localized feature representations.
@@ -63,7 +63,7 @@ class RBFActivation(nn.Module):
 
 
 class RandomFreqSineActivation(nn.Module):
-    """Random frequency sine activation with fixed random scale and bias.
+    r"""Random frequency sine activation with fixed random scale and bias.
 
     Applies sine activation with randomly initialized (but fixed) frequency
     scaling and phase shift:
@@ -137,7 +137,7 @@ class FunctionActivation(nn.Module):
 
 
 class RandomScaleLayer(nn.Module):
-    """Random scaling layer with optional per-feature parameters.
+    r"""Random scaling layer with optional per-feature parameters.
 
     Applies random scaling and bias:
     :math:`f(x) = \text{scale} \cdot (x + \text{bias})`.

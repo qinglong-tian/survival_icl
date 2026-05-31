@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 #SBATCH --signal=TERM@120
 #SBATCH --mail-user=qltian2021@gmail.com
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT

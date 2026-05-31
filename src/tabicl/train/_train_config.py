@@ -219,7 +219,7 @@ def build_parser():
     parser.add_argument(
         "--alpha_total_steps", type=int, default=None,
         help="[Survival] Global step horizon for alpha cosine decay. "
-             "When None, decays over (curr_step + max_steps). "
+             "When None, decays over max_steps. "
              "Set to STAGE1_TARGET_STEPS in chunked training so alpha spans the full "
              "curriculum rather than restarting per chunk."
     )

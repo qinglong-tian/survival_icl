@@ -46,7 +46,7 @@ def torch_nanstd(input, dim=None, keepdim=False, ddof=0, *, dtype=None) -> Tenso
 
 
 def standard_scaling(input: Tensor, clip_value: float = 100) -> Tensor:
-    """Standardize features by removing the mean and scaling to unit variance.
+    r"""Standardize features by removing the mean and scaling to unit variance.
 
     Computes :math:`(x - \mu) / \sigma` where NaNs are ignored in the
     :math:`\mu` and :math:`\sigma` calculation.
@@ -72,7 +72,7 @@ def standard_scaling(input: Tensor, clip_value: float = 100) -> Tensor:
 
 
 def outlier_removing(input: Tensor, threshold: float = 4.0) -> Tensor:
-    """Clamp outliers in the input tensor based on a specified number of standard deviations.
+    r"""Clamp outliers in the input tensor based on a specified number of standard deviations.
 
     Values outside :math:`[\mu - k\sigma,\; \mu + k\sigma]` are clamped,
     where :math:`k` is the threshold.
