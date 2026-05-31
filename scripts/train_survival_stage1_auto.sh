@@ -23,6 +23,7 @@
 #   STAGE1_TARGET_STEPS=100000
 #   STAGE1_CHUNK_STEPS=1000        (~5.5h @ ~20s/step with micro_batch=4)
 #   STAGE1_TIME=08:00:00           (per-chunk walltime; ~2.5h buffer)
+#   STAGE1_ALPHA_TOTAL_STEPS=100000
 #   SURVIVAL_CHECKPOINT_DIR=/scratch/$USER/survival-stage1
 #
 # For a 10% partial run (10K steps), launch with:
@@ -38,11 +39,13 @@ set -euo pipefail
 STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
 STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-1000}"
 STAGE1_TIME="${STAGE1_TIME:-08:00:00}"
+STAGE1_ALPHA_TOTAL_STEPS="${STAGE1_ALPHA_TOTAL_STEPS:-100000}"
 SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-stage1}"
 export SURVIVAL_CHECKPOINT_DIR  # so resubmitted jobs inherit it
 export STAGE1_TARGET_STEPS
 export STAGE1_CHUNK_STEPS
 export STAGE1_TIME
+export STAGE1_ALPHA_TOTAL_STEPS
 
 # Derive a human-readable label from STAGE1_TARGET_STEPS
 if (( STAGE1_TARGET_STEPS == 10000 )); then
@@ -66,6 +69,7 @@ echo "CPU/task:     ${SLURM_CPUS_PER_TASK:-?}"
 echo "Target steps: ${STAGE1_TARGET_STEPS}"
 echo "Chunk steps:  ${STAGE1_CHUNK_STEPS}"
 echo "Chunk time:   ${STAGE1_TIME}"
+echo "Alpha steps:  ${STAGE1_ALPHA_TOTAL_STEPS}"
 echo "Checkpoints:  ${CKPT_DIR}"
 echo "============================================"
 
@@ -209,7 +213,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --num_bins 50 \
     --alpha_start 3.0 \
     --alpha_floor 0.05 \
-    --alpha_total_steps "${STAGE1_TARGET_STEPS}" \
+    --alpha_total_steps "${STAGE1_ALPHA_TOTAL_STEPS}" \
     --embed_dim 128 \
     --col_num_blocks 3 \
     --col_nhead 4 \
@@ -278,7 +282,7 @@ fi
 THIS_SCRIPT="${BASH_SOURCE[0]}"
 NEXT_JOB_ID=$(sbatch --parsable \
     --time="${STAGE1_TIME}" \
-    --export="ALL,SURVIVAL_CHECKPOINT_DIR=${SURVIVAL_CHECKPOINT_DIR},STAGE1_TARGET_STEPS=${STAGE1_TARGET_STEPS},STAGE1_CHUNK_STEPS=${STAGE1_CHUNK_STEPS},STAGE1_TIME=${STAGE1_TIME}" \
+    --export="ALL,SURVIVAL_CHECKPOINT_DIR=${SURVIVAL_CHECKPOINT_DIR},STAGE1_TARGET_STEPS=${STAGE1_TARGET_STEPS},STAGE1_CHUNK_STEPS=${STAGE1_CHUNK_STEPS},STAGE1_TIME=${STAGE1_TIME},STAGE1_ALPHA_TOTAL_STEPS=${STAGE1_ALPHA_TOTAL_STEPS}" \
     "$THIS_SCRIPT")
 echo ""
 echo "============================================"

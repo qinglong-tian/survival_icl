@@ -622,6 +622,8 @@ class Trainer:
         else:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+            if "scaler_state" in checkpoint:
+                self.scaler.load_state_dict(checkpoint["scaler_state"])
             self.curr_step = checkpoint["curr_step"]
             print(f"Resuming training at step {self.curr_step}")
 
@@ -634,6 +636,7 @@ class Trainer:
             "state_dict": self.raw_model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
+            "scaler_state": self.scaler.state_dict(),
             "curr_step": self.curr_step,
         }
         if self.survival and hasattr(self, "binner"):
