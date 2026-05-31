@@ -47,6 +47,15 @@ export STAGE1_CHUNK_STEPS
 export STAGE1_TIME
 export STAGE1_ALPHA_TOTAL_STEPS
 
+GPU_COUNT="${SLURM_GPUS_ON_NODE:-2}"
+if [[ ! "$GPU_COUNT" =~ ^[0-9]+$ ]]; then
+    GPU_COUNT="${GPU_COUNT##*:}"
+fi
+if [[ ! "$GPU_COUNT" =~ ^[0-9]+$ || "$GPU_COUNT" -lt 1 ]]; then
+    GPU_COUNT=2
+fi
+CPU_COUNT="${SLURM_CPUS_PER_TASK:-24}"
+
 # Derive a human-readable label from STAGE1_TARGET_STEPS
 if (( STAGE1_TARGET_STEPS == 10000 )); then
     STAGE1_RUN_LABEL="10% partial run"
@@ -64,8 +73,8 @@ echo "============================================"
 echo "Stage 1 PH Survival — ${STAGE1_RUN_LABEL}"
 echo "Job ID:       ${SLURM_JOB_ID}"
 echo "Node:         $(hostname)"
-echo "GPUs:         ${SLURM_GPUS_ON_NODE:-?}"
-echo "CPU/task:     ${SLURM_CPUS_PER_TASK:-?}"
+echo "GPUs:         ${GPU_COUNT}"
+echo "CPU/task:     ${CPU_COUNT}"
 echo "Target steps: ${STAGE1_TARGET_STEPS}"
 echo "Chunk steps:  ${STAGE1_CHUNK_STEPS}"
 echo "Chunk time:   ${STAGE1_TIME}"
@@ -77,7 +86,10 @@ echo "============================================"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export PYTHONUNBUFFERED=1
 export TORCH_NCCL_ASYNC_HANDLING=1
-export OMP_NUM_THREADS=$((${SLURM_CPUS_PER_TASK:-24} / ${SLURM_GPUS_ON_NODE:-2}))
+export OMP_NUM_THREADS=$((CPU_COUNT / GPU_COUNT))
+if (( OMP_NUM_THREADS < 1 )); then
+    export OMP_NUM_THREADS=1
+fi
 export MKL_NUM_THREADS=${OMP_NUM_THREADS}
 
 # ---- modules + venv ----------------------------------------------------
@@ -166,7 +178,7 @@ print('Checkpoint cached')
 "
 
 # ---- training ----------------------------------------------------------
-NPROC="${SLURM_GPUS_ON_NODE:-2}"
+NPROC="${GPU_COUNT}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 echo ""
