@@ -1,16 +1,22 @@
 """Survival head and hybrid loss for TabICL fine-tuning with time-to-event data.
 
-Provides a discrete-time survival prediction head and a hybrid loss function that
-combines the discrete survival negative log-likelihood (on observables `(t_obs, delta)`)
-with a pinball imputation loss on the privileged counterfactual event times `t_event`
-(available only at training time in synthetic data).
+Provides per-task log-time scaling, a discrete-time survival prediction head, and
+a hybrid loss function that combines the discrete survival negative log-likelihood
+(on observables `(t_obs, delta)`) with a pinball imputation loss on the privileged
+counterfactual event times `t_event` (available only at training time in synthetic
+data).  The model is trained on standardized log-times; future inference code
+should fit :class:`SurvivalTimeScaler` on the in-context observed times, transform
+support labels before calling the model, interpret hazards on the standardized
+``TimeBinner``, and convert requested outputs back with ``inverse_time``.
 
 Usage sketch::
 
-    from tabicl.survival import TimeBinner, DiscreteTimeSurvivalHead, HybridSurvivalLoss
+    from tabicl.survival import SurvivalTimeScaler, TimeBinner, DiscreteTimeSurvivalHead, HybridSurvivalLoss
 
-    # Build bin boundaries from training event times
-    binner = TimeBinner.from_event_times(t_event_all, num_bins=50)
+    # Fit on context observed times only, then use fixed standardized bins.
+    scaler = SurvivalTimeScaler().fit(t_context)
+    z_context, delta_context = scaler.transform_observed(t_context, delta_context)
+    binner = TimeBinner.from_standardized_range(num_bins=50)
 
     # Load a pretrained TabICL checkpoint, then swap the decoder head
     model = TabICL(max_classes=0)  # regression path
@@ -29,3 +35,12 @@ from __future__ import annotations
 
 from tabicl.survival._head import TimeBinner, DiscreteTimeSurvivalHead
 from tabicl.survival._loss import HybridSurvivalLoss, censored_pinball_loss
+from tabicl.survival._scaler import SurvivalTimeScaler
+
+__all__ = [
+    "TimeBinner",
+    "DiscreteTimeSurvivalHead",
+    "HybridSurvivalLoss",
+    "censored_pinball_loss",
+    "SurvivalTimeScaler",
+]

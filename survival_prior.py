@@ -21,7 +21,7 @@ from tabicl.prior._genload import (
     cat_slice_nested_tensors,
 )
 from tabicl.prior._prior_config import DEFAULT_FIXED_HP, DEFAULT_SAMPLED_HP
-from tabicl.prior._survival import SurvivalSCMPrior
+from tabicl.prior._survival import DEFAULT_RAW_TIME_MAX, SurvivalSCMPrior
 
 warnings.filterwarnings(
     "ignore", message=".*The PyTorch API of nested tensors is in prototype stage.*", category=UserWarning
@@ -94,9 +94,9 @@ class SurvivalPriorDataset(IterableDataset):
         ``"mix"`` randomly selects a baseline per dataset with equal probability,
         or a fixed name like ``"weibull"``.
 
-    max_time : float, default=100.0
-        Upper bound for event times (hard clip). Prevents numerical overflow
-        from extreme inverse-CDF values.
+    max_time : float, default=1e30
+        Numerical safety maximum for raw event/censoring times.  Model-facing
+        horizons are handled by per-task standardized log-time scaling.
 
     u_eps : float, default=1e-6
         Epsilon for clipping uniform samples away from 0 and 1. Prevents
@@ -153,7 +153,7 @@ class SurvivalPriorDataset(IterableDataset):
         beta: float = 1.0,
         baseline_types: Optional[List[str]] = None,
         baseline_mode: str = "mix",
-        max_time: float = 100.0,
+        max_time: float = DEFAULT_RAW_TIME_MAX,
         u_eps: float = 1e-6,
         min_censor_scale: float = 1.0,
         max_censor_scale: float = 5.0,
@@ -730,7 +730,8 @@ if __name__ == "__main__":
     parser.add_argument("--n_jobs", type=int, default=1, help="Number of parallel jobs")
     parser.add_argument("--num_threads_per_generate", type=int, default=1, help="Threads per generation")
     parser.add_argument(
-        "--max_time", type=float, default=100.0, help="Maximum event time (hard clip)"
+        "--max_time", type=float, default=DEFAULT_RAW_TIME_MAX,
+        help="Numerical safety maximum for raw times; model-facing time is standardized later"
     )
     parser.add_argument(
         "--u_eps", type=float, default=1e-6, help="Epsilon for U clipping away from 0 and 1"

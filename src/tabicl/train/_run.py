@@ -398,6 +398,7 @@ class Trainer:
                     beta=getattr(self.config, "survival_beta", 1.0),
                     baseline_types=getattr(self.config, "baseline_types", ["weibull"]),
                     baseline_mode=getattr(self.config, "baseline_mode", "mix"),
+                    max_time=getattr(self.config, "survival_raw_time_max", 1e30),
                     min_censor_scale=getattr(self.config, "min_censor_scale", 1.0),
                     max_censor_scale=getattr(self.config, "max_censor_scale", 5.0),
                     min_event_rate=getattr(self.config, "min_event_rate", 0.40),
@@ -460,62 +461,20 @@ class Trainer:
         )
 
     def configure_binner(self):
-        """Build a TimeBinner from one batch of survival data.
-
-        Under DDP, only rank 0 samples data and broadcasts the bin
-        edges + means to all ranks.  This avoids redundant CPU generation
-        on every GPU.
-        """
+        """Build fixed bins on the standardized log-time axis."""
         from tabicl.survival import TimeBinner
 
-        if self.master_process:
-            print("Building TimeBinner from data sample...")
-
-        if not self.ddp or self.master_process:
-            t_event_samples = []
-            dl_iter = iter(self.dataloader)
-            for _ in range(4):
-                try:
-                    batch = next(dl_iter)
-                    t_event = batch[3]
-                    if t_event.is_nested:
-                        t_event = t_event.to_padded_tensor(padding=-1.0)
-                    t_flat = t_event.reshape(-1)
-                    t_flat = t_flat[t_flat > 0]
-                    if t_flat.numel() > 0:
-                        t_event_samples.append(t_flat)
-                except StopIteration:
-                    break
-
-            if not t_event_samples:
-                raise RuntimeError("Could not sample any survival batches for TimeBinner.")
-
-            all_t_event = torch.cat(t_event_samples)
-            self.binner = TimeBinner.from_event_times(
-                all_t_event, num_bins=getattr(self.config, "num_bins", 50),
-            )
-
-        if self.ddp:
-            # Broadcast binner edges + means from rank 0 to all ranks.
-            # TimeBinner.from_event_times returns CPU tensors; non-master
-            # ranks allocate on the configured device.  Move rank 0 to
-            # the correct device so NCCL broadcast sees uniform devices.
-            _nb = getattr(self.config, "num_bins", 50)
-            if self.master_process:
-                edges = self.binner.bin_edges.to(device=self.config.device)
-                means = self.binner.bin_means.to(device=self.config.device)
-            else:
-                edges = torch.zeros(_nb + 1, device=self.config.device)
-                means = torch.zeros(_nb, device=self.config.device)
-
-            from torch.distributed import broadcast
-            broadcast(edges, src=0)
-            broadcast(means, src=0)
-
-            if not self.master_process:
-                self.binner = TimeBinner(bin_edges=edges, bin_means=means)
-
-        self.binner = self.binner.to(torch.device(self.config.device))
+        self.survival_time_scaler_config = {
+            "eps": getattr(self.config, "survival_time_eps", 1e-8),
+            "min_scale": getattr(self.config, "survival_time_min_scale", 0.1),
+            "z_min": getattr(self.config, "survival_time_z_min", -6.0),
+            "z_max": getattr(self.config, "survival_time_z_max", 6.0),
+        }
+        self.binner = TimeBinner.from_standardized_range(
+            num_bins=getattr(self.config, "num_bins", 50),
+            z_min=self.survival_time_scaler_config["z_min"],
+            z_max=self.survival_time_scaler_config["z_max"],
+        ).to(torch.device(self.config.device))
 
         if self.master_process:
             print(f"TimeBinner: {self.binner}")
@@ -607,13 +566,25 @@ class Trainer:
         # Restore survival metadata if present
         surv_meta = checkpoint.get("survival_metadata", None)
         if surv_meta is not None and self.survival:
-            from tabicl.survival import TimeBinner
-            self.binner = TimeBinner(
-                bin_edges=surv_meta["binner_edges"].to(self.config.device),
-                bin_means=surv_meta["binner_means"].to(self.config.device),
-            )
-            self.binner = self.binner.to(torch.device(self.config.device))
-            print(f"Restored TimeBinner from checkpoint: {self.binner}")
+            if surv_meta.get("time_scale") == "context_robust_log":
+                from tabicl.survival import TimeBinner
+                self.binner = TimeBinner(
+                    bin_edges=surv_meta["binner_edges"].to(self.config.device),
+                    bin_means=surv_meta["binner_means"].to(self.config.device),
+                )
+                self.binner = self.binner.to(torch.device(self.config.device))
+                self.survival_time_scaler_config = surv_meta.get(
+                    "time_scaler",
+                    getattr(self, "survival_time_scaler_config", {
+                        "eps": getattr(self.config, "survival_time_eps", 1e-8),
+                        "min_scale": getattr(self.config, "survival_time_min_scale", 0.1),
+                        "z_min": getattr(self.config, "survival_time_z_min", -6.0),
+                        "z_max": getattr(self.config, "survival_time_z_max", 6.0),
+                    }),
+                )
+                print(f"Restored TimeBinner from checkpoint: {self.binner}")
+            else:
+                print("Checkpoint has legacy raw-time survival metadata; keeping standardized TimeBinner.")
 
         self.raw_model.load_state_dict(checkpoint["state_dict"])
 
@@ -645,6 +616,8 @@ class Trainer:
                 "binner_means": self.binner.bin_means,
                 "num_bins": self.binner.num_bins,
                 "task": "survival",
+                "time_scale": "context_robust_log",
+                "time_scaler": getattr(self, "survival_time_scaler_config", None),
             }
         torch.save(checkpoint, checkpoint_path)
 
@@ -788,6 +761,59 @@ class Trainer:
     # Micro-batch: survival
     # ------------------------------------------------------------------
 
+    def _standardize_survival_micro_batch(
+        self,
+        t_train,
+        delta_train,
+        t_test,
+        delta_test,
+        t_event_test,
+        train_sizes_ds,
+        query_sizes_ds,
+    ):
+        from tabicl.survival import SurvivalTimeScaler
+
+        scaler_kwargs = getattr(self, "survival_time_scaler_config", {
+            "eps": getattr(self.config, "survival_time_eps", 1e-8),
+            "min_scale": getattr(self.config, "survival_time_min_scale", 0.1),
+            "z_min": getattr(self.config, "survival_time_z_min", -6.0),
+            "z_max": getattr(self.config, "survival_time_z_max", 6.0),
+        })
+
+        t_train_z = torch.empty_like(t_train)
+        delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
+        t_test_z = torch.empty_like(t_test)
+        delta_test_z = torch.empty_like(delta_test, dtype=torch.float32)
+        t_event_test_z = torch.empty_like(t_event_test)
+
+        context_pos = torch.arange(t_train.shape[1], device=t_train.device)
+        query_pos = torch.arange(t_test.shape[1], device=t_test.device)
+
+        for ds_idx in range(t_train.shape[0]):
+            context_mask = context_pos < train_sizes_ds[ds_idx]
+            if not context_mask.any():
+                context_mask = context_mask.clone()
+                context_mask[0] = True
+
+            scaler = SurvivalTimeScaler(**scaler_kwargs).fit(
+                t_train[ds_idx], valid_mask=context_mask,
+            )
+
+            ctx_t, ctx_delta = scaler.transform_observed(t_train[ds_idx], delta_train[ds_idx])
+            ctx_t = torch.where(context_mask, ctx_t, torch.zeros_like(ctx_t))
+            ctx_delta = torch.where(context_mask, ctx_delta, torch.zeros_like(ctx_delta))
+            t_train_z[ds_idx] = ctx_t
+            delta_train_z[ds_idx] = ctx_delta
+
+            query_mask = query_pos < query_sizes_ds[ds_idx]
+            q_t, q_delta = scaler.transform_observed(t_test[ds_idx], delta_test[ds_idx])
+            q_event = scaler.transform_event(t_event_test[ds_idx])
+            t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
+            delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
+            t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
+
+        return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z
+
     def _run_micro_batch_survival(self, micro_batch, micro_batch_idx, num_micro_batches):
         (micro_X, micro_t, micro_delta, micro_t_event,
          micro_d, micro_seq_len, micro_train_size) = micro_batch
@@ -820,6 +846,10 @@ class Trainer:
         delta_train = micro_delta[:, :train_size]
         delta_test = micro_delta[:, train_size:]
         t_event_test = micro_t_event[:, train_size:]
+
+        t_train, delta_train, t_test, delta_test, t_event_test = self._standardize_survival_micro_batch(
+            t_train, delta_train, t_test, delta_test, t_event_test, train_sizes_ds, query_sizes_ds,
+        )
 
         if self.ddp:
             self.model.require_backward_grad_sync = micro_batch_idx == num_micro_batches - 1

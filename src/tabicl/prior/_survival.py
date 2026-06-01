@@ -18,6 +18,23 @@ from tabicl.prior._tree_scm import TreeSCM
 from tabicl.prior._reg2cls import Reg2Cls
 
 
+DEFAULT_RAW_TIME_MAX = 1e30
+MIN_RAW_TIME = 1e-8
+
+
+def _finite_positive_time(t: Tensor, max_time: float) -> Tensor:
+    """Sanitize raw time tensor: clamp to [MIN_RAW_TIME, max_time].
+
+    ``-inf`` is replaced by ``MIN_RAW_TIME`` (a tiny positive value) rather
+    than ``max_time`` because negative event times are physically meaningless
+    and should map near zero, not to the far horizon.  ``nan`` and ``+inf``
+    both map to ``max_time`` (conservative: "we don't know when it happens").
+    """
+    return torch.nan_to_num(
+        t, nan=max_time, posinf=max_time, neginf=MIN_RAW_TIME,
+    ).clamp(min=MIN_RAW_TIME, max=max_time)
+
+
 class BaselineHazard(ABC):
     """Abstract base class for baseline hazard distributions.
 
@@ -212,8 +229,9 @@ class ProportionalHazardSampler:
     baseline_mode : str, default="mix"
         ``"mix"`` randomly selects a baseline per dataset, or a fixed name
         like ``"weibull"``.
-    max_time : float, default=100.0
-        Upper bound for event times (hard clip applied after inverse CDF).
+    max_time : float, default=1e30
+        Numerical safety maximum for raw times.  The model-facing horizon is
+        set later by per-task standardized log-time scaling.
     u_eps : float, default=1e-6
         Epsilon for clipping uniform samples away from 0 and 1.
     """
@@ -223,7 +241,7 @@ class ProportionalHazardSampler:
         baseline_pool: Dict[str, BaselineHazard],
         beta: float = 1.0,
         baseline_mode: str = "mix",
-        max_time: float = 100.0,
+        max_time: float = DEFAULT_RAW_TIME_MAX,
         u_eps: float = 1e-6,
     ):
         self.baseline_pool = baseline_pool
@@ -278,13 +296,13 @@ class ProportionalHazardSampler:
         u = torch.rand(y.shape, device=device)
         u = u.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         t_event = baseline.inverse_cdf(u, log_risk, baseline_params)
-        t_event = t_event.clamp(max=self.max_time)
+        t_event = _finite_positive_time(t_event, self.max_time)
 
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         c = baseline.inverse_cdf(u_c, torch.zeros_like(log_risk), baseline_params)
         c = c * censor_scale
-        c = c.clamp(max=self.max_time)
+        c = _finite_positive_time(c, self.max_time)
 
         t_obs = torch.minimum(t_event, c)
         delta = (t_event < c).float()
@@ -428,8 +446,9 @@ class AcceleratedFailureTimeSampler:
         Multiplier for acceleration: ``T = T_0 * exp(-beta * y)``.
     baseline_mode : str, default="mix"
         ``"mix"`` randomly selects a baseline per dataset, or a fixed name.
-    max_time : float, default=100.0
-        Upper bound for event times (hard clip).
+    max_time : float, default=1e30
+        Numerical safety maximum for raw times.  The model-facing horizon is
+        set later by per-task standardized log-time scaling.
     u_eps : float, default=1e-6
         Epsilon for clipping uniform samples away from 0 and 1.
     """
@@ -439,7 +458,7 @@ class AcceleratedFailureTimeSampler:
         baseline_pool: Dict[str, AFTBaselineHazard],
         beta: float = 1.0,
         baseline_mode: str = "mix",
-        max_time: float = 100.0,
+        max_time: float = DEFAULT_RAW_TIME_MAX,
         u_eps: float = 1e-6,
     ):
         self.baseline_pool = baseline_pool
@@ -467,12 +486,12 @@ class AcceleratedFailureTimeSampler:
         u = u.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         t0 = baseline.baseline_time(u, baseline_params)
         t_event = t0 * torch.exp(-self.beta * y)
-        t_event = t_event.clamp(max=self.max_time)
+        t_event = _finite_positive_time(t_event, self.max_time)
 
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         c = baseline.baseline_time(u_c, baseline_params) * censor_scale
-        c = c.clamp(max=self.max_time)
+        c = _finite_positive_time(c, self.max_time)
 
         t_obs = torch.minimum(t_event, c)
         delta = (t_event < c).float()
@@ -500,8 +519,9 @@ class SurvivalSCMPrior(SCMPrior):
     baseline_mode : str, default="mix"
         ``"mix"`` randomly selects a baseline per dataset, or a fixed name
         like ``"weibull"``.
-    max_time : float, default=100.0
-        Upper bound for event times (hard clip).
+    max_time : float, default=1e30
+        Numerical safety maximum for raw event/censoring times.  The
+        model-facing horizon is set later by standardized log-time scaling.
     u_eps : float, default=1e-6
         Epsilon for clipping uniform samples away from 0 and 1.
     min_censor_scale : float, default=1.0
@@ -516,7 +536,7 @@ class SurvivalSCMPrior(SCMPrior):
 
     def __init__(self, *args, model_type: str = "ph", beta: float = 1.0,
                  baseline_types=None, baseline_mode: str = "mix",
-                 max_time: float = 100.0, u_eps: float = 1e-6,
+                 max_time: float = DEFAULT_RAW_TIME_MAX, u_eps: float = 1e-6,
                  min_censor_scale: float = 1.0, max_censor_scale: float = 5.0,
                  min_event_rate: float = 0.40, max_event_rate: float = 1.0,
                  **kwargs):

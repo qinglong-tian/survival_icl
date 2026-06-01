@@ -240,6 +240,11 @@ def build_parser():
     parser.add_argument("--max_censor_scale", type=float, default=5.0, help="[Survival] Maximum censoring scale factor")
     parser.add_argument("--min_event_rate", type=float, default=0.40, help="[Survival] Minimum event rate per dataset")
     parser.add_argument("--max_event_rate", type=float, default=1.0, help="[Survival] Maximum event rate per dataset")
+    parser.add_argument("--survival_raw_time_max", type=float, default=1e30, help="[Survival] Numerical safety maximum for raw generated times")
+    parser.add_argument("--survival_time_eps", type=float, default=1e-8, help="[Survival] Epsilon for log-time scaling")
+    parser.add_argument("--survival_time_min_scale", type=float, default=0.1, help="[Survival] Minimum robust log-time scale")
+    parser.add_argument("--survival_time_z_min", type=float, default=-6.0, help="[Survival] Minimum standardized log-time")
+    parser.add_argument("--survival_time_z_max", type=float, default=6.0, help="[Survival] Maximum standardized log-time")
     parser.add_argument(
         "--pretrained_path", type=str, default=None,
         help="[Survival] Path to pretrained TabICL checkpoint for encoder initialization (HF Hub if None)"

@@ -198,11 +198,12 @@ delta = (t < c).float()  ← 1=event happened before censoring
 **PH (4):** Weibull (k~U[0.5,3]), Gompertz (γ~LogU[0.01,0.5]), LogLogistic (β~U[0.5,3]), LogNormal (μ~U[-2,2],σ=1)
 **AFT (3):** Weibull, LogLogistic, LogNormal (same params, no Gompertz)
 
-### Clipping (3-layer)
+### Clipping / Scaling
 
 1. `u.clamp(ε, 1-ε)` with ε=1e-6 (configurable via `--u_eps`)
 2. Internal: arg ≤ 36.0 in `inverse_cdf`; p clamped in `ndtri`
-3. `t.clamp(max=max_time)` with default 100.0 (`--max_time`)
+3. Raw times use a numerical safety max (`--max_time`, default 1e30), not a modeling horizon.
+4. Model-facing times are per-task standardized log-times fit on context observed times only, then clipped to [-6, 6].
 
 ### Run Scripts (use `--n_jobs 4` for best throughput)
 

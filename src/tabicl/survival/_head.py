@@ -116,6 +116,23 @@ class TimeBinner:
 
         return cls(bin_edges=edges, bin_means=bin_means)
 
+    @classmethod
+    def from_standardized_range(
+        cls,
+        num_bins: int = 50,
+        z_min: float = -6.0,
+        z_max: float = 6.0,
+    ) -> "TimeBinner":
+        """Build fixed bins on the standardized log-time axis."""
+        if num_bins < 1:
+            raise ValueError(f"num_bins must be positive, got {num_bins}")
+        if z_max <= z_min:
+            raise ValueError(f"z_max must be greater than z_min, got {z_min}, {z_max}")
+
+        edges = torch.linspace(z_min, z_max, num_bins + 1, dtype=torch.float32)
+        bin_means = (edges[:-1] + edges[1:]) * 0.5
+        return cls(bin_edges=edges, bin_means=bin_means)
+
     # --- bin assignment ---------------------------------------------------
 
     def bin_index(self, t: Tensor) -> Tensor:
