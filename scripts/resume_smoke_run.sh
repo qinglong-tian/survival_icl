@@ -47,6 +47,16 @@ if [[ ! -f "$RESUME_CKPT" ]]; then
     exit 2
 fi
 
+RESUME_NAME="$(basename "$RESUME_CKPT")"
+RESUME_STEP="${RESUME_NAME#step-}"
+RESUME_STEP="${RESUME_STEP%%.ckpt}"
+RESUME_STEP="${RESUME_STEP%%-*}"
+if [[ ! "$RESUME_STEP" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Could not parse resume step from ${RESUME_CKPT}" >&2
+    exit 2
+fi
+TARGET_STEP=$((RESUME_STEP + 50))
+
 echo "============================================"
 echo "Survival Pretraining Resume Smoke Test"
 echo "Job ID:      ${SLURM_JOB_ID}"
@@ -54,6 +64,7 @@ echo "Node:        $(hostname)"
 echo "GPUs:        ${GPU_COUNT}"
 echo "CPU/task:    ${CPU_COUNT}"
 echo "Resume from: ${RESUME_CKPT}"
+echo "Target step: ${TARGET_STEP}"
 echo "============================================"
 
 # ---- environment -------------------------------------------------------
@@ -138,7 +149,7 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 
 echo ""
 echo "============================================"
-echo "Training: ${NPROC} GPUs, resume at step 300 → 350"
+echo "Training: ${NPROC} GPUs, resume at step ${RESUME_STEP} → ${TARGET_STEP}"
 echo "Checkpoints: ${CKPT_DIR}"
 echo "============================================"
 echo ""
@@ -151,7 +162,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --amp True \
     --np_seed 42 \
     --torch_seed 42 \
-    --max_steps 350 \
+    --max_steps "${TARGET_STEP}" \
     --batch_size 512 \
     --micro_batch_size 8 \
     --lr 1e-4 \
@@ -196,21 +207,78 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --save_perm_every 50 \
     --wandb_log False
 
-# ---- verify checkpoints ------------------------------------------------
+# ---- verify gates ------------------------------------------------------
+set +e  # don't exit on gate failure — print diagnosis first
+FAILED=0
+LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+OUTFILE="${LOG_DIR}/survresume-${SLURM_JOB_ID}.out"
+ERRFILE="${LOG_DIR}/survresume-${SLURM_JOB_ID}.err"
+
 echo ""
 echo "============================================"
+echo "Gate checks"
+echo "============================================"
+
+if [[ -f "${CKPT_DIR}/step-${TARGET_STEP}.ckpt" ]]; then
+    echo "  [PASS] step-${TARGET_STEP}.ckpt"
+else
+    echo "  [FAIL] step-${TARGET_STEP}.ckpt missing"
+    FAILED=1
+fi
+
+if [[ ! -f "${OUTFILE}" ]]; then
+    echo "  [FAIL] output log missing: ${OUTFILE}"
+    FAILED=1
+else
+    if grep -q "Loading checkpoint from ${RESUME_CKPT}" "${OUTFILE}"; then
+        echo "  [PASS] checkpoint load message"
+    else
+        echo "  [FAIL] checkpoint load message missing"
+        FAILED=1
+    fi
+
+    if grep -q "Resuming training at step ${RESUME_STEP}" "${OUTFILE}"; then
+        echo "  [PASS] resume step message"
+    else
+        echo "  [FAIL] resume step message missing"
+        FAILED=1
+    fi
+
+    if ! grep -qE 'surv_nll|impute' "${OUTFILE}"; then
+        echo "  [FAIL] no surv_nll/impute lines found in output log"
+        FAILED=1
+    elif grep -E 'surv_nll|impute' "${OUTFILE}" | grep -qEi '\b(nan|inf)\b'; then
+        echo "  [FAIL] NaN/inf found in loss output"
+        grep -nEi 'surv_nll.*(nan|inf)|impute.*(nan|inf)' "${OUTFILE}" || true
+        FAILED=1
+    else
+        echo "  [PASS] surv_nll + impute finite"
+    fi
+fi
+
+if [[ -f "${ERRFILE}" ]] && grep -qiE 'traceback|RuntimeError|ChildFailedError|load_state|OutOfMemory|out of memory|(^|[^[:alnum:]_])(nan|inf)([^[:alnum:]_]|$)' "${ERRFILE}"; then
+    echo "  [FAIL] failure pattern found in error log"
+    grep -niE 'traceback|RuntimeError|ChildFailedError|load_state|OutOfMemory|out of memory|(^|[^[:alnum:]_])(nan|inf)([^[:alnum:]_]|$)' "${ERRFILE}" || true
+    FAILED=1
+else
+    echo "  [PASS] no failure pattern in error log"
+fi
+
+echo ""
 echo "Checkpoints:"
 ls -lh "${CKPT_DIR}/" 2>/dev/null || echo "(no checkpoints)"
 echo "============================================"
 
+if [[ $FAILED -ne 0 ]]; then
+    echo ""
+    echo "=== RESUME SMOKE: FAILED ($FAILED gate(s) failed) ==="
+    echo "Output:     ${OUTFILE}"
+    echo "Errors:     ${ERRFILE}"
+    exit 1
+fi
+
 echo ""
 echo "=== Resume smoke test complete ==="
-echo "Output:     survresume-${SLURM_JOB_ID}.out"
-echo "Errors:     survresume-${SLURM_JOB_ID}.err"
+echo "Output:     ${OUTFILE}"
+echo "Errors:     ${ERRFILE}"
 echo "Checkpoints: ${CKPT_DIR}/"
-echo ""
-echo "Verify:"
-echo "  ls -lh ${CKPT_DIR}/"
-echo "  grep -E 'Loading checkpoint|Resuming training' survresume-${SLURM_JOB_ID}.out"
-echo "  grep -E 'surv_nll|impute' survresume-${SLURM_JOB_ID}.out | tail -10"
-echo "  grep -iE 'traceback|RuntimeError|load_state|nan|inf' survresume-${SLURM_JOB_ID}.err"

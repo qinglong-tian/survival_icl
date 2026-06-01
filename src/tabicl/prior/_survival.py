@@ -611,7 +611,8 @@ class SurvivalSCMPrior(SCMPrior):
         else:
             raise ValueError(f"Unknown prior type {params['prior_type']}")
 
-        for _ in range(5000):
+        max_attempts = 5000
+        for _ in range(max_attempts):
             X, y = prior_cls(**params)()
             X, y = Reg2Cls(params)(X, y)
 
@@ -641,7 +642,7 @@ class SurvivalSCMPrior(SCMPrior):
                     return X_out, t, delta, t_event, d_out
 
         raise RuntimeError(
-            f"SurvivalSCMPrior failed to generate valid dataset after 10000 total attempts. "\
+            f"SurvivalSCMPrior failed to generate valid dataset after {max_attempts} total attempts. "\
             f"params: prior_type={params.get('prior_type')}, "\
             f"seq_len={params.get('seq_len')}, "\
             f"baseline_type={params.get('baseline_type')}, "\
@@ -679,7 +680,6 @@ class SurvivalSCMPrior(SCMPrior):
 
             group_sampled_hp = self.hp_sampling()
             group_baseline_type = self.baseline_mode
-            group_baseline_params = {}
             if group_baseline_type == "mix":
                 names = list(self.baseline_pool.keys())
                 group_baseline_type = names[int(rng.integers(0, len(names)))]

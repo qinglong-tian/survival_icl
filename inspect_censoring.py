@@ -17,7 +17,7 @@ def inspect_batch(dataset, model_type, label):
     print(dataset)
     print()
 
-    X, t, delta, d, seq_lens, train_sizes = dataset.get_batch()
+    X, t, delta, t_event, d, seq_lens, train_sizes = dataset.get_batch()
     B = X.shape[0]
 
     t_np = t.cpu().numpy()
@@ -61,9 +61,8 @@ def inspect_batch(dataset, model_type, label):
     # Fraction of datasets rejected (we can't directly observe this from
     # get_batch since it only returns valid ones, but we can inspect the
     # delta distribution to see how many are near the bounds)
-    near_lower = (event_rates >= 0.50).sum()
-    near_upper = (event_rates <= 0.97).sum()
-    print(f"  within [0.40, 1.0]: {int(near_lower & near_upper)}/{B}")
+    within_bounds = ((event_rates >= dataset.min_event_rate) & (event_rates <= dataset.max_event_rate)).sum()
+    print(f"  within [{dataset.min_event_rate:.2f}, {dataset.max_event_rate:.2f}]: {within_bounds}/{B}")
 
 
 def main():
@@ -75,7 +74,7 @@ def main():
         batch_size=32,
         max_seq_len=512,
         max_features=30,
-        prior_type="mix_scm",
+        prior_type="mlp_scm",
         model_type="ph",
         beta=1.0,
         baseline_types=["weibull", "gompertz", "loglogistic", "lognormal"],
@@ -97,7 +96,7 @@ def main():
         batch_size=32,
         max_seq_len=512,
         max_features=30,
-        prior_type="mix_scm",
+        prior_type="mlp_scm",
         model_type="ph",
         beta=1.0,
         baseline_types=["weibull"],
@@ -119,7 +118,7 @@ def main():
         batch_size=32,
         max_seq_len=512,
         max_features=30,
-        prior_type="mix_scm",
+        prior_type="mlp_scm",
         model_type="ph",
         beta=1.0,
         baseline_types=["lognormal"],
@@ -141,7 +140,7 @@ def main():
         batch_size=32,
         max_seq_len=512,
         max_features=30,
-        prior_type="mix_scm",
+        prior_type="mlp_scm",
         model_type="aft",
         beta=1.0,
         baseline_types=["weibull", "loglogistic", "lognormal"],
@@ -166,7 +165,7 @@ def main():
         batch_size=200,
         max_seq_len=1024,
         max_features=30,
-        prior_type="mix_scm",
+        prior_type="mlp_scm",
         model_type="ph",
         baseline_types=["weibull", "gompertz", "loglogistic", "lognormal"],
         baseline_mode="mix",
@@ -180,7 +179,7 @@ def main():
         max_train_size=900,
     )
     start = time.time()
-    X, t, delta, d, seq_lens, train_sizes = ph_bench.get_batch()
+    X, t, delta, t_event, d, seq_lens, train_sizes = ph_bench.get_batch()
     elapsed = time.time() - start
     event_rates = delta.float().mean(dim=1)
     print(f"  {X.shape[0]} datasets generated in {elapsed:.2f}s "

@@ -195,8 +195,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
 # ---- verify gates ------------------------------------------------------
 set +e  # don't exit on gate failure — print diagnosis first
 FAILED=0
-OUTFILE="survmedium-${SLURM_JOB_ID}.out"
-ERRFILE="survmedium-${SLURM_JOB_ID}.err"
+LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+OUTFILE="${LOG_DIR}/survmedium-${SLURM_JOB_ID}.out"
+ERRFILE="${LOG_DIR}/survmedium-${SLURM_JOB_ID}.err"
 
 echo ""
 echo "============================================"
@@ -213,16 +214,31 @@ for step in 100 200 300; do
     fi
 done
 
-# Gate 2: no NaN/inf in loss lines
-if grep -E 'surv_nll|impute' "${OUTFILE}" | grep -qE '\bnan\b|\binf\b'; then
+# Gate 2: loss lines are present and contain no NaN/inf
+if [[ ! -f "${OUTFILE}" ]]; then
+    echo "  [FAIL] output log missing: ${OUTFILE}"
+    FAILED=1
+elif ! grep -qE 'surv_nll|impute' "${OUTFILE}"; then
+    echo "  [FAIL] no surv_nll/impute lines found in output log"
+    FAILED=1
+elif grep -E 'surv_nll|impute' "${OUTFILE}" | grep -qEi '\b(nan|inf)\b'; then
     echo "  [FAIL] NaN/inf found in loss output"
-    grep -nE 'surv_nll.*nan|impute.*nan|surv_nll.*inf|impute.*inf' "${OUTFILE}" || true
+    grep -nEi 'surv_nll.*(nan|inf)|impute.*(nan|inf)' "${OUTFILE}" || true
     FAILED=1
 else
     echo "  [PASS] surv_nll + impute finite"
 fi
 
-# Gate 3: checkpoints verified
+# Gate 3: stderr does not contain hard failures
+if [[ -f "${ERRFILE}" ]] && grep -qiE 'traceback|RuntimeError|ChildFailedError|OutOfMemory|out of memory|(^|[^[:alnum:]_])(nan|inf)([^[:alnum:]_]|$)' "${ERRFILE}"; then
+    echo "  [FAIL] failure pattern found in error log"
+    grep -niE 'traceback|RuntimeError|ChildFailedError|OutOfMemory|out of memory|(^|[^[:alnum:]_])(nan|inf)([^[:alnum:]_]|$)' "${ERRFILE}" || true
+    FAILED=1
+else
+    echo "  [PASS] no failure pattern in error log"
+fi
+
+# Checkpoints verified
 echo ""
 echo "Checkpoints:"
 ls -lh "${CKPT_DIR}/" 2>/dev/null || echo "(no checkpoints)"
