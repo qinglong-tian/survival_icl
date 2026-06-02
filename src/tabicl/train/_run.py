@@ -54,6 +54,14 @@ class Timer:
         return False  # Don't suppress exceptions
 
 
+def _parse_baseline_types(config):
+    """Parse baseline_types from config, returning a list of strings."""
+    raw = getattr(config, "baseline_types", "weibull")
+    if isinstance(raw, str):
+        return [b.strip() for b in raw.split(",") if b.strip()]
+    return raw
+
+
 def ddp_cleanup(func):
     """Decorator to clean up DDP process group after method execution.
 
@@ -403,7 +411,7 @@ class Trainer:
                     time_scale_sampling=getattr(self.config, "time_scale_sampling", "fixed"),
                     min_time_scale=getattr(self.config, "min_time_scale", 0.2),
                     max_time_scale=getattr(self.config, "max_time_scale", 5.0),
-                    baseline_types=getattr(self.config, "baseline_types", ["weibull"]),
+                    baseline_types=_parse_baseline_types(self.config),
                     baseline_mode=getattr(self.config, "baseline_mode", "mix"),
                     max_time=getattr(self.config, "survival_raw_time_max", 1e30),
                     min_censor_scale=getattr(self.config, "min_censor_scale", 1.0),

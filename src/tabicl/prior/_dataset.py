@@ -231,7 +231,7 @@ class Prior:
                 train_size = min_train_size
             else:
                 train_size = np.random.randint(min_train_size, max_train_size)
-        elif isinstance(min_train_size, float) and isinstance(min_train_size, float):
+        elif isinstance(min_train_size, float) and isinstance(max_train_size, float):
             train_size = np.random.uniform(min_train_size, max_train_size)
             train_size = int(seq_len * train_size)
         else:

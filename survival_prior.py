@@ -520,6 +520,7 @@ class LoadSurvivalPriorDataset(IterableDataset):
         self.ddp_world_size = ddp_world_size
         self.ddp_rank = ddp_rank
         self.current_idx = ddp_rank + start_from
+        self.start_from = start_from
         self.max_batches = max_batches
         self.timeout = timeout
         self.delete_after_load = delete_after_load
@@ -542,6 +543,7 @@ class LoadSurvivalPriorDataset(IterableDataset):
         self.buffer_seq_lens = None
         self.buffer_train_sizes = None
         self.buffer_size = 0
+        self._batches_loaded = 0
 
     def __iter__(self):
         return self
@@ -586,10 +588,11 @@ class LoadSurvivalPriorDataset(IterableDataset):
 
     def __next__(self):
         while self.buffer_size < self.batch_size:
-            if self.max_batches is not None and self.current_idx >= self.max_batches:
+            if self.max_batches is not None and self._batches_loaded >= self.max_batches:
                 break
             try:
                 X, t, delta, t_event, d, seq_lens, train_sizes, file_batch_size = self._load_batch_file()
+                self._batches_loaded += 1
                 if self.buffer_X is None:
                     self.buffer_X = X
                     self.buffer_t = t
@@ -625,7 +628,7 @@ class LoadSurvivalPriorDataset(IterableDataset):
                     # Infinite mode — cycle back to start
                     if self.current_idx >= self.ddp_rank + 1000000:
                         print("Warning: cycled past 1M batches; if this is intentional, increase start_from")
-                    self.current_idx = self.ddp_rank
+                    self.current_idx = self.ddp_rank + self.start_from
                     continue
 
         if self.buffer_size == 0:

@@ -437,14 +437,12 @@ class ProportionalHazardSampler:
 
         u = torch.rand(y.shape, device=device)
         u = u.clamp(min=self.u_eps, max=1.0 - self.u_eps)
-        t_event = baseline.inverse_cdf(u, log_risk, baseline_params)
-        t_event = _finite_positive_time(t_event, self.max_time)
+        t_event_raw = baseline.inverse_cdf(u, log_risk, baseline_params)
 
         # Generate independent base censoring times (no covariate effect)
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         c_base = baseline.inverse_cdf(u_c, torch.zeros_like(log_risk), baseline_params)
-        c_base = _finite_positive_time(c_base, self.max_time)
 
         if censoring_strategy == "target_event_rate":
             if target_event_rate is None:
@@ -453,7 +451,9 @@ class ProportionalHazardSampler:
                     "censoring_strategy='target_event_rate'"
                 )
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                t_event, c_base, target_event_rate, eps=calibration_eps,
+                _finite_positive_time(t_event_raw, self.max_time),
+                _finite_positive_time(c_base, self.max_time),
+                target_event_rate, eps=calibration_eps,
             )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
@@ -461,11 +461,12 @@ class ProportionalHazardSampler:
                 "Options: 'target_event_rate', 'uniform_scale'."
             )
 
-        c = c_base * censor_scale
-        c = _finite_positive_time(c, self.max_time)
-
+        # Determine event/censoring status from pre-clamp ordering
+        delta = (t_event_raw < c_base * censor_scale).float()
+        # Then sanitize — clamping after delta preserves the ordering
+        t_event = _finite_positive_time(t_event_raw, self.max_time)
+        c = _finite_positive_time(c_base * censor_scale, self.max_time)
         t_obs = torch.minimum(t_event, c)
-        delta = (t_event < c).float()
 
         return t_obs, delta, t_event
 
@@ -685,14 +686,12 @@ class AcceleratedFailureTimeSampler:
         t0 = baseline.baseline_time(u, baseline_params)
         beta = beta_eff if beta_eff is not None else self.beta
         log_risk = (beta * y).clamp(-20.0, 20.0)
-        t_event = t0 * torch.exp(-log_risk)
-        t_event = _finite_positive_time(t_event, self.max_time)
+        t_event_raw = t0 * torch.exp(-log_risk)
 
         # Generate independent base censoring times (no covariate effect)
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         c_base = baseline.baseline_time(u_c, baseline_params)
-        c_base = _finite_positive_time(c_base, self.max_time)
 
         if censoring_strategy == "target_event_rate":
             if target_event_rate is None:
@@ -701,7 +700,9 @@ class AcceleratedFailureTimeSampler:
                     "censoring_strategy='target_event_rate'"
                 )
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                t_event, c_base, target_event_rate, eps=calibration_eps,
+                _finite_positive_time(t_event_raw, self.max_time),
+                _finite_positive_time(c_base, self.max_time),
+                target_event_rate, eps=calibration_eps,
             )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
@@ -709,11 +710,12 @@ class AcceleratedFailureTimeSampler:
                 "Options: 'target_event_rate', 'uniform_scale'."
             )
 
-        c = c_base * censor_scale
-        c = _finite_positive_time(c, self.max_time)
-
+        # Determine event/censoring status from pre-clamp ordering
+        delta = (t_event_raw < c_base * censor_scale).float()
+        # Then sanitize — clamping after delta preserves the ordering
+        t_event = _finite_positive_time(t_event_raw, self.max_time)
+        c = _finite_positive_time(c_base * censor_scale, self.max_time)
         t_obs = torch.minimum(t_event, c)
-        delta = (t_event < c).float()
 
         return t_obs, delta, t_event
 
@@ -828,6 +830,11 @@ class SurvivalSCMPrior(SCMPrior):
         self.max_censor_scale = max_censor_scale
         self.min_event_rate = min_event_rate
         self.max_event_rate = max_event_rate
+        # Snapshot a seed for the survival-layer RNG from the global stream
+        # at construction time.  Two instances built after the same
+        # np.random.seed() call will produce identical t, delta, t_event
+        # for n_jobs=1.
+        self._rng_entropy = np.random.randint(0, 2**31, dtype=np.int64)
         if censoring_strategy not in ("target_event_rate", "uniform_scale"):
             raise ValueError(
                 f"Unknown censoring_strategy '{censoring_strategy}'. "
@@ -848,6 +855,27 @@ class SurvivalSCMPrior(SCMPrior):
             self._setup_ph_baselines()
         if model_type in ("aft", "mix"):
             self._setup_aft_baselines()
+
+        # Validate that fixed baseline_mode names are present in pools
+        if baseline_mode != "mix":
+            in_ph = (model_type in ("ph", "mix") and baseline_mode in self.ph_baseline_pool)
+            in_aft = (model_type in ("aft", "mix") and baseline_mode in self.aft_baseline_pool)
+            if model_type == "ph" and not in_ph:
+                raise ValueError(
+                    f"baseline_mode='{baseline_mode}' is not in the PH baseline pool. "
+                    f"Available: {list(self.ph_baseline_pool.keys())}"
+                )
+            if model_type == "aft" and not in_aft:
+                raise ValueError(
+                    f"baseline_mode='{baseline_mode}' is not in the AFT baseline pool. "
+                    f"Available: {list(self.aft_baseline_pool.keys())}"
+                )
+            if model_type == "mix" and not (in_ph or in_aft):
+                raise ValueError(
+                    f"baseline_mode='{baseline_mode}' is not in either PH or AFT pool. "
+                    f"PH: {list(self.ph_baseline_pool.keys())}, "
+                    f"AFT: {list(self.aft_baseline_pool.keys())}"
+                )
 
     def _setup_ph_baselines(self):
         broad = (self.baseline_param_prior == "broad")
@@ -947,8 +975,16 @@ class SurvivalSCMPrior(SCMPrior):
         event_rate = delta.float().mean().item()
         if calibrating:
             # Under target_event_rate strategy, the calibration chooses the
-            # scale to hit the requested rate — use broad hard bounds only.
-            if event_rate < 0.05 or event_rate > 0.98:
+            # scale to hit the requested rate.  Use count-based bounds with
+            # ±1 tolerance for discrete small datasets.  Allow full-range
+            # when min/max_event_rate are at their extremes.
+            n = delta.numel()
+            min_count = max(0 if min_event_rate <= 0.0 else 1,
+                            int(min_event_rate * n) - 1)
+            max_count = min(n if max_event_rate >= 1.0 else n - 1,
+                            int(max_event_rate * n) + 1)
+            event_count = int(delta.sum().item())
+            if event_count < min_count or event_count > max_count:
                 return False
         else:
             if event_rate < min_event_rate or event_rate > max_event_rate:
@@ -1029,6 +1065,14 @@ class SurvivalSCMPrior(SCMPrior):
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         batch_size = batch_size or self.batch_size
 
+        # Derive a stable survival-layer RNG from construction-time entropy,
+        # then advance it so consecutive batches get different baselines.
+        # Two instances built after the same np.random.seed() produce identical
+        # t, delta, t_event on their first batch (n_jobs=1 only).
+        if not hasattr(self, "_survival_rng"):
+            self._survival_rng = np.random.default_rng(self._rng_entropy)
+        local_rng = self._survival_rng
+
         size_per_gp = min(self.batch_size_per_gp, batch_size)
         num_gps = math.ceil(batch_size / size_per_gp)
 
@@ -1046,8 +1090,6 @@ class SurvivalSCMPrior(SCMPrior):
                     self.min_seq_len, self.max_seq_len, log=self.log_seq_len, replay_small=self.replay_small
                 )
             global_train_size = self.sample_train_size(self.min_train_size, self.max_train_size, global_seq_len)
-
-        rng = np.random.default_rng()
 
         for gp_idx in range(num_gps):
             actual_gp_size = min(size_per_gp, batch_size - gp_idx * size_per_gp)
@@ -1083,8 +1125,8 @@ class SurvivalSCMPrior(SCMPrior):
 
             if group_baseline_type == "mix":
                 names = list(pool.keys())
-                group_baseline_type = names[int(rng.integers(0, len(names)))]
-            group_baseline_params = pool[group_baseline_type].sample_params(rng)
+                group_baseline_type = names[int(local_rng.integers(0, len(names)))]
+            group_baseline_params = pool[group_baseline_type].sample_params(local_rng)
             group_censor_scale = float(np.random.uniform(self.min_censor_scale, self.max_censor_scale))
 
             if self.seq_len_per_gp:
@@ -1143,13 +1185,19 @@ class SurvivalSCMPrior(SCMPrior):
                         "time_scale": group_time_scale,
                         "min_event_rate": self.min_event_rate,
                         "max_event_rate": self.max_event_rate,
-                        "_rng": rng,
+                        "_rng": local_rng,
                     }
                     param_list.append(params)
 
-        if self.n_jobs > 1 and self.device == "cpu":
+        n_jobs = self.n_jobs
+        # Normalize: -1 means "all CPUs" as documented by the Joblib convention.
+        if n_jobs < 0:
+            import joblib as _joblib
+            n_jobs = _joblib.cpu_count()
+
+        if n_jobs > 1 and self.device == "cpu":
             with joblib.parallel_config(
-                n_jobs=self.n_jobs, backend="threading", prefer="threads"
+                n_jobs=n_jobs, backend="threading", prefer="threads"
             ):
                 results = joblib.Parallel()(joblib.delayed(self.generate_dataset)(params) for params in param_list)
         else:
