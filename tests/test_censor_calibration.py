@@ -9,9 +9,10 @@ def test_exact_k_events_achieved():
     t_event = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
     c_base = torch.ones_like(t_event)
     scale, diag = calibrate_censor_scale_by_quantile(t_event, c_base, 0.6)
-    # Target 0.6: 3/5 events = 0.6
+    # Target 0.6: 3/5 events = 0.6. Scale must be ≤ the 4th value
+    # since s = unique_vals[3] = 4.0 gives exactly 3 events under strict <.
     assert abs(diag["achieved"] - 0.6) < 0.01
-    assert 3.0 < scale < 4.0
+    assert 3.0 < scale <= 4.0
 
 
 def test_below_smallest_yields_zero():

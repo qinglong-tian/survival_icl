@@ -20,8 +20,8 @@ python survival_prior.py \
     --baseline_mode mix \
     --min_features 2 --max_features 100 \
     --max_seq_len 1024 \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu
 
 # ----------------------------------
@@ -39,8 +39,8 @@ python survival_prior.py \
     --min_features 2 --max_features 100 \
     --min_seq_len 1000 --max_seq_len 40000 \
     --log_seq_len True --seq_len_per_gp True \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu
 
 # ----------------------------------
@@ -59,8 +59,8 @@ python survival_prior.py \
     --min_seq_len 40000 --max_seq_len 60000 \
     --log_seq_len True --seq_len_per_gp True \
     --replay_small True \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu
 
 # =============================================
@@ -80,8 +80,8 @@ python survival_prior.py \
     --baseline_mode mix \
     --min_features 2 --max_features 100 \
     --max_seq_len 1024 \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu
 
 # Stage 2 — Medium variable-length datasets
@@ -98,8 +98,8 @@ python survival_prior.py \
     --min_features 2 --max_features 100 \
     --min_seq_len 1000 --max_seq_len 40000 \
     --log_seq_len True --seq_len_per_gp True \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu
 
 # Stage 3 — Large variable-length datasets
@@ -117,6 +117,6 @@ python survival_prior.py \
     --min_seq_len 40000 --max_seq_len 60000 \
     --log_seq_len True --seq_len_per_gp True \
     --replay_small True \
-    --min_censor_scale 1.0 --max_censor_scale 5.0 \
-    --min_event_rate 0.40 --max_event_rate 1.0 \
+    --censoring_strategy target_event_rate \
+    --min_event_rate 0.40 --max_event_rate 0.90 \
     --n_jobs -1 --num_threads_per_generate 1 --device cpu

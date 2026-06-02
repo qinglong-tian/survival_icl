@@ -31,9 +31,11 @@ def calibrate_censor_scale_by_quantile(
     """Find the censoring scale that achieves a target event rate under strict ``<``.
 
     Computes per-subject ratios ``r = t_event / c_base``, sorts them, then
-    searches over candidate thresholds (midpoints between adjacent sorted
-    ratios) to find the one whose strict-``<`` empirical event rate is
-    closest to ``target_event_rate``.
+    finds the unique-regime threshold whose strict-``<`` empirical event rate
+    is closest to ``target_event_rate``.
+
+    Complexity: O(n log n) from the sort; the candidate search is O(n)
+    because there are at most n+1 distinct regimes.
 
     Parameters
     ----------
@@ -57,37 +59,55 @@ def calibrate_censor_scale_by_quantile(
     r_sorted = torch.sort(r, stable=True).values
     n = r_sorted.numel()
 
-    # Build candidate thresholds: midpoints between adjacent ratios.
-    # For n subjects there are n+1 achievable strict-< regimes:
-    #   s < r[0]        → 0 events
-    #   r[0] < s < r[1] → 1 event
-    #   …
-    #   r[n-1] < s      → n events
-    # Choosing the midpoint between adjacent ratios gives us the
-    # threshold that yields exactly k events when ratios are unique.
-    candidates = []
-    candidates.append(r_sorted[0] * 0.5)  # below smallest
-    for i in range(n - 1):
-        candidates.append(0.5 * (r_sorted[i] + r_sorted[i + 1]))
-    candidates.append(r_sorted[-1] * 2.0)  # above largest
+    # Build candidate thresholds from unique tie-groups.
+    # We use the upper unique value as the threshold for each interior
+    # regime: s = unique_vals[i].  With strict <, this guarantees that
+    # all ratios in groups 0..i-1 are < s and all ratios in group i are
+    # = s (therefore ≥ s), so the achieved event count is cumcount[i-1].
+    # Midpoints between adjacent unique values can round back to one
+    # endpoint in float32, making diagnostics['achieved'] unreliable.
+    unique_vals, counts = torch.unique_consecutive(r_sorted, return_counts=True)
+    cumcount = torch.cumsum(counts, dim=0)
+    n_uniq = len(unique_vals)
 
-    best_scale = candidates[0]
+    # Build (threshold, achieved_rate) for each distinct regime.
+    # Regime 0: threshold well below smallest ratio → 0 events
+    # Regime i (1..n_uniq-1): s = unique_vals[i] → cumcount[i-1] events
+    # Regime n_uniq: threshold well above largest ratio → n events
+    targets = []  # list of (threshold, achieved_rate)
+    for i in range(n_uniq + 1):
+        if i == 0:
+            s = float((unique_vals[0] * 0.5).item())
+            k = 0
+        elif i == n_uniq:
+            s = float((unique_vals[-1] * 2.0).item())
+            k = n
+        else:
+            # s = unique_vals[i] — strict < excludes this tie group
+            s = float(unique_vals[i].item())
+            k = int(cumcount[i - 1].item())
+        rate = float(k) / float(n)
+        targets.append((s, rate))
+
+    # Find the regime whose achieved rate is closest to target.
+    best_scale = targets[0][0]
     best_err = float("inf")
-    best_achieved = 0.0
-    for s in candidates:
-        achieved = (r < s).float().mean().item()
-        err = abs(achieved - target_event_rate)
+    for s, rate in targets:
+        err = abs(rate - target_event_rate)
         if err < best_err:
             best_err = err
             best_scale = s
-            best_achieved = achieved
 
     best_scale = max(float(best_scale), eps)
+    # Recompute diagnostics from the clamped scale so that achieved/error
+    # are always consistent with the returned value.  The eps clamp can
+    # move the threshold into a different regime when ratios are tiny.
+    achieved = (r < best_scale).float().mean().item()
     diagnostics = {
         "target": target_event_rate,
-        "achieved": best_achieved,
+        "achieved": achieved,
         "scale": best_scale,
-        "absolute_error": best_err,
+        "absolute_error": abs(achieved - target_event_rate),
         "n_subjects": n,
     }
     return best_scale, diagnostics
@@ -392,6 +412,11 @@ class ProportionalHazardSampler:
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
                 t_event, c_base, target_event_rate, eps=calibration_eps,
             )
+        elif censoring_strategy != "uniform_scale":
+            raise ValueError(
+                f"Unknown censoring_strategy '{censoring_strategy}'. "
+                "Options: 'target_event_rate', 'uniform_scale'."
+            )
 
         c = c_base * censor_scale
         c = _finite_positive_time(c, self.max_time)
@@ -596,6 +621,11 @@ class AcceleratedFailureTimeSampler:
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
                 t_event, c_base, target_event_rate, eps=calibration_eps,
             )
+        elif censoring_strategy != "uniform_scale":
+            raise ValueError(
+                f"Unknown censoring_strategy '{censoring_strategy}'. "
+                "Options: 'target_event_rate', 'uniform_scale'."
+            )
 
         c = c_base * censor_scale
         c = _finite_positive_time(c, self.max_time)
@@ -659,6 +689,11 @@ class SurvivalSCMPrior(SCMPrior):
         self.max_censor_scale = max_censor_scale
         self.min_event_rate = min_event_rate
         self.max_event_rate = max_event_rate
+        if censoring_strategy not in ("target_event_rate", "uniform_scale"):
+            raise ValueError(
+                f"Unknown censoring_strategy '{censoring_strategy}'. "
+                "Options: 'target_event_rate', 'uniform_scale'."
+            )
         self.censoring_strategy = censoring_strategy
         if model_type == "ph":
             self._setup_ph_baselines()
