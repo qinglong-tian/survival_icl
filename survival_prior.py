@@ -81,11 +81,27 @@ class SurvivalPriorDataset(IterableDataset):
         ``"mlp_scm"``, ``"tree_scm"``, ``"mix_scm"``, or ``"dummy"``.
 
     model_type : str, default="ph"
-        ``"ph"`` for proportional hazard, ``"aft"`` for accelerated failure time.
-        Controls which survival model and baseline pool is used.
+        ``"ph"`` for proportional hazard, ``"aft"`` for accelerated failure time,
+        ``"mix"`` samples PH/aft with equal probability per GP group.
 
     beta : float, default=1.0
         PH: log relative risk ``beta * y``. AFT: time scaling ``exp(-beta * y)``.
+        Only used when ``beta_sampling="fixed"``.
+
+    beta_sampling : str, default="fixed"
+        ``"fixed"`` uses ``beta``. ``"log_uniform"`` samples per GP group.
+
+    min_beta : float, default=0.25
+    max_beta : float, default=2.0
+
+    baseline_param_prior : str, default="current"
+        ``"current"`` or ``"broad"`` — broader parameter ranges.
+
+    time_scale_sampling : str, default="fixed"
+        ``"fixed"`` or ``"log_uniform"`` — per-GP time scale multiplier.
+
+    min_time_scale : float, default=0.2
+    max_time_scale : float, default=5.0
 
     baseline_types : list of str, default=["weibull", "gompertz", "loglogistic", "lognormal"]
         Baseline hazard distributions in the pool. Gompertz is ignored in AFT mode.
@@ -159,6 +175,13 @@ class SurvivalPriorDataset(IterableDataset):
         prior_type: str = "mlp_scm",
         model_type: str = "ph",
         beta: float = 1.0,
+        beta_sampling: str = "fixed",
+        min_beta: float = 0.25,
+        max_beta: float = 2.0,
+        baseline_param_prior: str = "current",
+        time_scale_sampling: str = "fixed",
+        min_time_scale: float = 0.2,
+        max_time_scale: float = 5.0,
         baseline_types: Optional[List[str]] = None,
         baseline_mode: str = "mix",
         max_time: float = DEFAULT_RAW_TIME_MAX,
@@ -199,6 +222,13 @@ class SurvivalPriorDataset(IterableDataset):
         self.baseline_mode = baseline_mode
         self.model_type = model_type
         self.beta = beta
+        self.beta_sampling = beta_sampling
+        self.min_beta = min_beta
+        self.max_beta = max_beta
+        self.baseline_param_prior = baseline_param_prior
+        self.time_scale_sampling = time_scale_sampling
+        self.min_time_scale = min_time_scale
+        self.max_time_scale = max_time_scale
         self.max_time = max_time
         self.u_eps = u_eps
         self.min_censor_scale = min_censor_scale
@@ -225,6 +255,13 @@ class SurvivalPriorDataset(IterableDataset):
                 **default_kwargs,
                 model_type=model_type,
                 beta=beta,
+                beta_sampling=beta_sampling,
+                min_beta=min_beta,
+                max_beta=max_beta,
+                baseline_param_prior=baseline_param_prior,
+                time_scale_sampling=time_scale_sampling,
+                min_time_scale=min_time_scale,
+                max_time_scale=max_time_scale,
                 baseline_types=self.baseline_types,
                 baseline_mode=baseline_mode,
                 max_time=max_time,
@@ -281,7 +318,9 @@ class SurvivalPriorDataset(IterableDataset):
             f"  sequence length varies across groups: {self.seq_len_per_gp}\n"
             f"  train_size: {self.min_train_size} - {self.max_train_size}\n"
             f"  model_type: {self.model_type}\n"
-            f"  beta: {self.beta}\n"
+            f"  beta: {self.beta} (sampling: {self.beta_sampling})\n"
+            f"  baseline_param_prior: {self.baseline_param_prior}\n"
+            f"  time_scale_sampling: {self.time_scale_sampling}\n"
             f"  baseline_types: {self.baseline_types}\n"
             f"  baseline_mode: {self.baseline_mode}\n"
             f"  max_time: {self.max_time}\n"
@@ -325,6 +364,13 @@ class SaveSurvivalPriorDataset:
             prior_type=self.args.prior_type,
             model_type=self.args.model_type,
             beta=self.args.beta,
+            beta_sampling=self.args.beta_sampling,
+            min_beta=self.args.min_beta,
+            max_beta=self.args.max_beta,
+            baseline_param_prior=self.args.baseline_param_prior,
+            time_scale_sampling=self.args.time_scale_sampling,
+            min_time_scale=self.args.min_time_scale,
+            max_time_scale=self.args.max_time_scale,
             baseline_types=self.args.baseline_types,
             baseline_mode=self.args.baseline_mode,
             max_time=self.args.max_time,
@@ -358,6 +404,13 @@ class SaveSurvivalPriorDataset:
             "max_train_size": self.args.max_train_size,
             "replay_small": self.args.replay_small,
             "beta": self.args.beta,
+            "beta_sampling": self.args.beta_sampling,
+            "min_beta": self.args.min_beta,
+            "max_beta": self.args.max_beta,
+            "baseline_param_prior": self.args.baseline_param_prior,
+            "time_scale_sampling": self.args.time_scale_sampling,
+            "min_time_scale": self.args.min_time_scale,
+            "max_time_scale": self.args.max_time_scale,
             "baseline_types": self.args.baseline_types,
             "baseline_mode": self.args.baseline_mode,
             "max_time": self.args.max_time,
@@ -719,14 +772,47 @@ if __name__ == "__main__":
         "--model_type",
         type=str,
         default="ph",
-        choices=["ph", "aft"],
-        help="Survival model: proportional hazard (ph) or accelerated failure time (aft)",
+        choices=["ph", "aft", "mix"],
+        help="Survival model: ph, aft, or mix (per-GP group random)",
     )
     parser.add_argument(
         "--beta",
         type=float,
         default=1.0,
-        help="beta multiplier (PH: log_risk=beta*y, AFT: T=T0*exp(-beta*y))",
+        help="Effect size multiplier (used when beta_sampling=fixed)",
+    )
+    parser.add_argument(
+        "--beta_sampling",
+        type=str,
+        default="fixed",
+        choices=["fixed", "log_uniform"],
+        help="Beta sampling: fixed (single value) or log_uniform (per-GP)",
+    )
+    parser.add_argument(
+        "--min_beta", type=float, default=0.25, help="Min beta under log_uniform"
+    )
+    parser.add_argument(
+        "--max_beta", type=float, default=2.0, help="Max beta under log_uniform"
+    )
+    parser.add_argument(
+        "--baseline_param_prior",
+        type=str,
+        default="current",
+        choices=["current", "broad"],
+        help="Baseline parameter prior: current or broad (wider ranges)",
+    )
+    parser.add_argument(
+        "--time_scale_sampling",
+        type=str,
+        default="fixed",
+        choices=["fixed", "log_uniform"],
+        help="Time scale sampling: fixed (1.0) or log_uniform (per-GP)",
+    )
+    parser.add_argument(
+        "--min_time_scale", type=float, default=0.2, help="Min time scale under log_uniform"
+    )
+    parser.add_argument(
+        "--max_time_scale", type=float, default=5.0, help="Max time scale under log_uniform"
     )
     parser.add_argument(
         "--baseline_types",

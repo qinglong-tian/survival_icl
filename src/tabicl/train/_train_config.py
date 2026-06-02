@@ -224,10 +224,20 @@ def build_parser():
              "curriculum rather than restarting per chunk."
     )
     parser.add_argument(
-        "--survival_model_type", type=str, default="ph", choices=["ph", "aft"],
-        help="[Survival] PH = proportional hazard, AFT = accelerated failure time"
+        "--survival_model_type", type=str, default="ph", choices=["ph", "aft", "mix"],
+        help="[Survival] PH = proportional hazard, AFT = accelerated failure time, mix = random per GP group"
     )
-    parser.add_argument("--survival_beta", type=float, default=1.0, help="[Survival] Effect size multiplier beta")
+    parser.add_argument("--survival_beta", type=float, default=1.0, help="[Survival] Effect size multiplier beta (used when beta_sampling=fixed)")
+    parser.add_argument("--beta_sampling", type=str, default="fixed", choices=["fixed", "log_uniform"],
+        help="[Survival] Beta sampling: fixed or log_uniform (per-GP)")
+    parser.add_argument("--min_beta", type=float, default=0.25, help="[Survival] Min beta under log_uniform")
+    parser.add_argument("--max_beta", type=float, default=2.0, help="[Survival] Max beta under log_uniform")
+    parser.add_argument("--baseline_param_prior", type=str, default="current", choices=["current", "broad"],
+        help="[Survival] Baseline parameter prior: current or broad (wider ranges)")
+    parser.add_argument("--time_scale_sampling", type=str, default="fixed", choices=["fixed", "log_uniform"],
+        help="[Survival] Time scale sampling: fixed or log_uniform (per-GP)")
+    parser.add_argument("--min_time_scale", type=float, default=0.2, help="[Survival] Min time scale under log_uniform")
+    parser.add_argument("--max_time_scale", type=float, default=5.0, help="[Survival] Max time scale under log_uniform")
     parser.add_argument(
         "--baseline_types", type=str, default="weibull,gompertz,loglogistic,lognormal",
         help="[Survival] Comma-separated baseline hazard names"

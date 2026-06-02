@@ -184,18 +184,31 @@ class WeibullHazard(BaselineHazard):
 
     Parameters
     ----------
-    k_min : float, default=0.5
-        Minimum shape parameter.
-    k_max : float, default=3.0
-        Maximum shape parameter.
+    k_min : float, optional
+        Minimum shape (uniform sampling).  Mutually exclusive with k_log_*.
+    k_max : float, optional
+        Maximum shape (uniform sampling).
+    k_log_min : float, optional
+        Log of minimum shape for log-uniform sampling.
+    k_log_max : float, optional
+        Log of maximum shape for log-uniform sampling.
     """
 
-    def __init__(self, k_min: float = 0.5, k_max: float = 3.0):
-        self.k_min = k_min
-        self.k_max = k_max
+    def __init__(self, k_min: float | None = None, k_max: float | None = None,
+                 k_log_min: float | None = None, k_log_max: float | None = None):
+        if k_min is not None and k_log_min is not None:
+            raise ValueError("Cannot specify both k_min and k_log_min for WeibullHazard.")
+        if k_log_min is not None:
+            self.k_min = k_log_min
+            self.k_max = k_log_max
+            self._sample = lambda rng: float(np.exp(rng.uniform(self.k_min, self.k_max)))
+        else:
+            self.k_min = k_min if k_min is not None else 0.5
+            self.k_max = k_max if k_max is not None else 3.0
+            self._sample = lambda rng: float(rng.uniform(self.k_min, self.k_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"k": float(rng.uniform(self.k_min, self.k_max))}
+        return {"k": self._sample(rng)}
 
     def inverse_cdf(self, u: Tensor, log_risk: Tensor, params: Dict[str, float]) -> Tensor:
         k = params["k"]
@@ -250,18 +263,27 @@ class LogLogisticHazard(BaselineHazard):
 
     Parameters
     ----------
-    beta_min : float, default=0.5
-        Minimum shape parameter.
-    beta_max : float, default=3.0
-        Maximum shape parameter.
+    beta_min : float, optional
+    beta_max : float, optional
+    beta_log_min : float, optional
+    beta_log_max : float, optional
     """
 
-    def __init__(self, beta_min: float = 0.5, beta_max: float = 3.0):
-        self.beta_min = beta_min
-        self.beta_max = beta_max
+    def __init__(self, beta_min: float | None = None, beta_max: float | None = None,
+                 beta_log_min: float | None = None, beta_log_max: float | None = None):
+        if beta_min is not None and beta_log_min is not None:
+            raise ValueError("Cannot specify both beta_min and beta_log_min for LogLogisticHazard.")
+        if beta_log_min is not None:
+            self.beta_min = beta_log_min
+            self.beta_max = beta_log_max
+            self._sample = lambda rng: float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+        else:
+            self.beta_min = beta_min if beta_min is not None else 0.5
+            self.beta_max = beta_max if beta_max is not None else 3.0
+            self._sample = lambda rng: float(rng.uniform(self.beta_min, self.beta_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"beta": float(rng.uniform(self.beta_min, self.beta_max))}
+        return {"beta": self._sample(rng)}
 
     def inverse_cdf(self, u: Tensor, log_risk: Tensor, params: Dict[str, float]) -> Tensor:
         beta = params["beta"]
@@ -274,11 +296,11 @@ class LogLogisticHazard(BaselineHazard):
 
 
 class LogNormalHazard(BaselineHazard):
-    """Log-normal baseline hazard with scale fixed at 1.
+    """Log-normal baseline hazard.
 
-    Baseline distribution: ``log(T) ~ N(mu, 1)``
-    Baseline survival: ``S_0(t) = Phi(-(log(t) - mu))`` where Phi is standard normal CDF
-    Inverse CDF: ``T = exp(mu - Phi^(-1)(U^(1/exp(log_risk))))``
+    Baseline distribution: ``log(T) ~ N(mu, sigma^2)``
+    Baseline survival: ``S_0(t) = Phi(-(log(t) - mu)/sigma)``
+    Inverse CDF: ``T = exp(mu - sigma * Phi^(-1)(U^(1/exp(log_risk))))``
 
     Uses ``torch.special.ndtri`` for the standard normal quantile function.
 
@@ -288,20 +310,35 @@ class LogNormalHazard(BaselineHazard):
         Minimum location parameter.
     mu_max : float, default=2.0
         Maximum location parameter.
+    sigma_log_min : float, optional
+        If set with sigma_log_max, samples ``sigma ~ LogUniform`` instead
+        of fixing sigma=1.
+    sigma_log_max : float, optional
+        Upper bound for log-uniform sigma sampling.
     """
 
-    def __init__(self, mu_min: float = -2.0, mu_max: float = 2.0):
+    def __init__(self, mu_min: float = -2.0, mu_max: float = 2.0,
+                 sigma_log_min: float | None = None,
+                 sigma_log_max: float | None = None):
         self.mu_min = mu_min
         self.mu_max = mu_max
+        self.sigma_log_min = sigma_log_min
+        self.sigma_log_max = sigma_log_max
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"mu": float(rng.uniform(self.mu_min, self.mu_max))}
+        mu = float(rng.uniform(self.mu_min, self.mu_max))
+        if self.sigma_log_min is not None and self.sigma_log_max is not None:
+            sigma = float(np.exp(rng.uniform(self.sigma_log_min, self.sigma_log_max)))
+        else:
+            sigma = 1.0
+        return {"mu": mu, "sigma": sigma}
 
     def inverse_cdf(self, u: Tensor, log_risk: Tensor, params: Dict[str, float]) -> Tensor:
         mu = params["mu"]
+        sigma = params.get("sigma", 1.0)
         p = u.pow(1.0 / torch.exp(log_risk))
         p = p.clamp(min=1e-7, max=1.0 - 1e-7)
-        return torch.exp(mu - torch.special.ndtri(p))
+        return torch.exp(mu - sigma * torch.special.ndtri(p))
 
     @property
     def name(self) -> str:
@@ -352,6 +389,7 @@ class ProportionalHazardSampler:
         censoring_strategy: str = "uniform_scale",
         target_event_rate: float | None = None,
         calibration_eps: float = 1e-12,
+        beta_eff: float | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Convert continuous regression target into event times.
 
@@ -377,6 +415,8 @@ class ProportionalHazardSampler:
             Required when ``censoring_strategy="target_event_rate"``.
         calibration_eps : float, default=1e-12
             Epsilon for the calibration helper.
+        beta_eff : float or None, default=None
+            Effective beta to use; falls back to ``self.beta`` if None.
 
         Returns
         -------
@@ -392,7 +432,8 @@ class ProportionalHazardSampler:
             baseline_name = names[int(rng.integers(0, len(names)))]
 
         baseline = self.baseline_pool[baseline_name]
-        log_risk = self.beta * y
+        beta = beta_eff if beta_eff is not None else self.beta
+        log_risk = (beta * y).clamp(-20.0, 20.0)
 
         u = torch.rand(y.shape, device=device)
         u = u.clamp(min=self.u_eps, max=1.0 - self.u_eps)
@@ -406,9 +447,11 @@ class ProportionalHazardSampler:
         c_base = _finite_positive_time(c_base, self.max_time)
 
         if censoring_strategy == "target_event_rate":
-            assert target_event_rate is not None, (
-                "target_event_rate is required when censoring_strategy='target_event_rate'"
-            )
+            if target_event_rate is None:
+                raise ValueError(
+                    "target_event_rate is required when "
+                    "censoring_strategy='target_event_rate'"
+                )
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
                 t_event, c_base, target_event_rate, eps=calibration_eps,
             )
@@ -470,16 +513,27 @@ class WeibullAFT(AFTBaselineHazard):
 
     Parameters
     ----------
-    k_min : float, default=0.5
-    k_max : float, default=3.0
+    k_min : float, optional
+    k_max : float, optional
+    k_log_min : float, optional
+    k_log_max : float, optional
     """
 
-    def __init__(self, k_min: float = 0.5, k_max: float = 3.0):
-        self.k_min = k_min
-        self.k_max = k_max
+    def __init__(self, k_min: float | None = None, k_max: float | None = None,
+                 k_log_min: float | None = None, k_log_max: float | None = None):
+        if k_min is not None and k_log_min is not None:
+            raise ValueError("Cannot specify both k_min and k_log_min for WeibullAFT.")
+        if k_log_min is not None:
+            self.k_min = k_log_min
+            self.k_max = k_log_max
+            self._sample = lambda rng: float(np.exp(rng.uniform(self.k_min, self.k_max)))
+        else:
+            self.k_min = k_min if k_min is not None else 0.5
+            self.k_max = k_max if k_max is not None else 3.0
+            self._sample = lambda rng: float(rng.uniform(self.k_min, self.k_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"k": float(rng.uniform(self.k_min, self.k_max))}
+        return {"k": self._sample(rng)}
 
     def baseline_time(self, u: Tensor, params: Dict[str, float]) -> Tensor:
         k = params["k"]
@@ -492,28 +546,40 @@ class WeibullAFT(AFTBaselineHazard):
 
 
 class LogNormalAFT(AFTBaselineHazard):
-    """Log-normal AFT baseline with scale sigma=1.
+    """Log-normal AFT baseline.
 
-    Baseline time: ``T_0 = exp(mu - Phi^(-1)(U))``
+    Baseline time: ``T_0 = exp(mu - sigma * Phi^(-1)(U))``
     Final time: ``T = T_0 * exp(-beta * y)``
 
     Parameters
     ----------
     mu_min : float, default=-2.0
     mu_max : float, default=2.0
+    sigma_log_min : float, optional
+    sigma_log_max : float, optional
     """
 
-    def __init__(self, mu_min: float = -2.0, mu_max: float = 2.0):
+    def __init__(self, mu_min: float = -2.0, mu_max: float = 2.0,
+                 sigma_log_min: float | None = None,
+                 sigma_log_max: float | None = None):
         self.mu_min = mu_min
         self.mu_max = mu_max
+        self.sigma_log_min = sigma_log_min
+        self.sigma_log_max = sigma_log_max
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"mu": float(rng.uniform(self.mu_min, self.mu_max))}
+        mu = float(rng.uniform(self.mu_min, self.mu_max))
+        if self.sigma_log_min is not None and self.sigma_log_max is not None:
+            sigma = float(np.exp(rng.uniform(self.sigma_log_min, self.sigma_log_max)))
+        else:
+            sigma = 1.0
+        return {"mu": mu, "sigma": sigma}
 
     def baseline_time(self, u: Tensor, params: Dict[str, float]) -> Tensor:
         mu = params["mu"]
+        sigma = params.get("sigma", 1.0)
         u = u.clamp(min=1e-7, max=1.0 - 1e-7)
-        return torch.exp(mu - torch.special.ndtri(u))
+        return torch.exp(mu - sigma * torch.special.ndtri(u))
 
     @property
     def name(self) -> str:
@@ -528,16 +594,27 @@ class LogLogisticAFT(AFTBaselineHazard):
 
     Parameters
     ----------
-    beta_min : float, default=0.5
-    beta_max : float, default=3.0
+    beta_min : float, optional
+    beta_max : float, optional
+    beta_log_min : float, optional
+    beta_log_max : float, optional
     """
 
-    def __init__(self, beta_min: float = 0.5, beta_max: float = 3.0):
-        self.beta_min = beta_min
-        self.beta_max = beta_max
+    def __init__(self, beta_min: float | None = None, beta_max: float | None = None,
+                 beta_log_min: float | None = None, beta_log_max: float | None = None):
+        if beta_min is not None and beta_log_min is not None:
+            raise ValueError("Cannot specify both beta_min and beta_log_min for LogLogisticAFT.")
+        if beta_log_min is not None:
+            self.beta_min = beta_log_min
+            self.beta_max = beta_log_max
+            self._sample = lambda rng: float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+        else:
+            self.beta_min = beta_min if beta_min is not None else 0.5
+            self.beta_max = beta_max if beta_max is not None else 3.0
+            self._sample = lambda rng: float(rng.uniform(self.beta_min, self.beta_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
-        return {"beta": float(rng.uniform(self.beta_min, self.beta_max))}
+        return {"beta": self._sample(rng)}
 
     def baseline_time(self, u: Tensor, params: Dict[str, float]) -> Tensor:
         beta = params["beta"]
@@ -595,6 +672,7 @@ class AcceleratedFailureTimeSampler:
         censoring_strategy: str = "uniform_scale",
         target_event_rate: float | None = None,
         calibration_eps: float = 1e-12,
+        beta_eff: float | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         if baseline_name == "mix":
             names = list(self.baseline_pool.keys())
@@ -605,7 +683,9 @@ class AcceleratedFailureTimeSampler:
         u = torch.rand(y.shape, device=device)
         u = u.clamp(min=self.u_eps, max=1.0 - self.u_eps)
         t0 = baseline.baseline_time(u, baseline_params)
-        t_event = t0 * torch.exp(-self.beta * y)
+        beta = beta_eff if beta_eff is not None else self.beta
+        log_risk = (beta * y).clamp(-20.0, 20.0)
+        t_event = t0 * torch.exp(-log_risk)
         t_event = _finite_positive_time(t_event, self.max_time)
 
         # Generate independent base censoring times (no covariate effect)
@@ -615,9 +695,11 @@ class AcceleratedFailureTimeSampler:
         c_base = _finite_positive_time(c_base, self.max_time)
 
         if censoring_strategy == "target_event_rate":
-            assert target_event_rate is not None, (
-                "target_event_rate is required when censoring_strategy='target_event_rate'"
-            )
+            if target_event_rate is None:
+                raise ValueError(
+                    "target_event_rate is required when "
+                    "censoring_strategy='target_event_rate'"
+                )
             censor_scale, _diag = calibrate_censor_scale_by_quantile(
                 t_event, c_base, target_event_rate, eps=calibration_eps,
             )
@@ -648,9 +730,29 @@ class SurvivalSCMPrior(SCMPrior):
     See :class:`tabicl.prior._dataset.SCMPrior` for all base parameters.
 
     model_type : str, default="ph"
-        ``"ph"`` for proportional hazard, ``"aft"`` for accelerated failure time.
+        ``"ph"`` for proportional hazard, ``"aft"`` for accelerated failure time,
+        ``"mix"`` samples PH or AFT per GP group with equal probability.
     beta : float, default=1.0
         PH: ``log_risk = beta * y``.  AFT: ``T = T_0 * exp(-beta * y)``.
+    beta_sampling : str, default="fixed"
+        ``"fixed"`` uses ``beta`` directly. ``"log_uniform"`` samples
+        ``beta_eff ~ LogUniform(min_beta, max_beta)`` per GP group.
+    min_beta : float, default=0.25
+        Minimum beta under log-uniform sampling.
+    max_beta : float, default=2.0
+        Maximum beta under log-uniform sampling.
+    baseline_param_prior : str, default="current"
+        ``"current"`` uses the existing parameter ranges. ``"broad"`` uses
+        wider distributions (log-uniform for k, beta, gamma; free sigma for
+        log-normal).
+    time_scale_sampling : str, default="fixed"
+        ``"fixed"`` uses scale=1.0. ``"log_uniform"`` samples
+        ``time_scale ~ LogUniform(min_time_scale, max_time_scale)`` per GP
+        group and multiplies all baseline times.
+    min_time_scale : float, default=0.2
+        Minimum time-scale multiplier.
+    max_time_scale : float, default=5.0
+        Maximum time-scale multiplier.
     baseline_types : list of str, default=["weibull", "gompertz", "loglogistic", "lognormal"]
         Which baseline hazards to include in the pool. Gompertz is ignored in AFT mode.
     baseline_mode : str, default="mix"
@@ -672,6 +774,11 @@ class SurvivalSCMPrior(SCMPrior):
     """
 
     def __init__(self, *args, model_type: str = "ph", beta: float = 1.0,
+                 beta_sampling: str = "fixed",
+                 min_beta: float = 0.25, max_beta: float = 2.0,
+                 baseline_param_prior: str = "current",
+                 time_scale_sampling: str = "fixed",
+                 min_time_scale: float = 0.2, max_time_scale: float = 5.0,
                  baseline_types=None, baseline_mode: str = "mix",
                  max_time: float = DEFAULT_RAW_TIME_MAX, u_eps: float = 1e-6,
                  min_censor_scale: float = 1.0, max_censor_scale: float = 5.0,
@@ -681,6 +788,38 @@ class SurvivalSCMPrior(SCMPrior):
         super().__init__(*args, **kwargs)
         self.model_type = model_type
         self.beta = beta
+        self.beta_sampling = beta_sampling
+        self.min_beta = min_beta
+        self.max_beta = max_beta
+        self.baseline_param_prior = baseline_param_prior
+        self.time_scale_sampling = time_scale_sampling
+        self.min_time_scale = min_time_scale
+        self.max_time_scale = max_time_scale
+        if baseline_param_prior not in ("current", "broad"):
+            raise ValueError(
+                f"Unknown baseline_param_prior '{baseline_param_prior}'. "
+                "Options: 'current', 'broad'."
+            )
+        if time_scale_sampling not in ("fixed", "log_uniform"):
+            raise ValueError(
+                f"Unknown time_scale_sampling '{time_scale_sampling}'. "
+                "Options: 'fixed', 'log_uniform'."
+            )
+        if beta_sampling not in ("fixed", "log_uniform"):
+            raise ValueError(
+                f"Unknown beta_sampling '{beta_sampling}'. "
+                "Options: 'fixed', 'log_uniform'."
+            )
+        if beta_sampling == "log_uniform" and not (0.0 < min_beta <= max_beta):
+            raise ValueError(
+                f"Invalid beta range for log_uniform: min_beta={min_beta}, "
+                f"max_beta={max_beta}. Must satisfy 0 < min_beta <= max_beta."
+            )
+        if time_scale_sampling == "log_uniform" and not (0.0 < min_time_scale <= max_time_scale):
+            raise ValueError(
+                f"Invalid time_scale range for log_uniform: min_time_scale={min_time_scale}, "
+                f"max_time_scale={max_time_scale}. Must satisfy 0 < min_time_scale <= max_time_scale."
+            )
         self.baseline_types = baseline_types or ["weibull", "gompertz", "loglogistic", "lognormal"]
         self.baseline_mode = baseline_mode
         self.max_time = max_time
@@ -695,27 +834,47 @@ class SurvivalSCMPrior(SCMPrior):
                 "Options: 'target_event_rate', 'uniform_scale'."
             )
         self.censoring_strategy = censoring_strategy
-        if model_type == "ph":
+        if model_type not in ("ph", "aft", "mix"):
+            raise ValueError(
+                f"Unknown model_type '{model_type}'. Options: 'ph', 'aft', 'mix'."
+            )
+        # Gompertz is not available in AFT mode — reject any AFT-adjacent usage
+        if baseline_mode == "gompertz" and model_type in ("aft", "mix"):
+            raise ValueError(
+                f"model_type='{model_type}' is incompatible with baseline_mode='gompertz' "
+                "— Gompertz is not available in AFT mode. Use baseline_mode='mix' instead."
+            )
+        if model_type in ("ph", "mix"):
             self._setup_ph_baselines()
-        elif model_type == "aft":
+        if model_type in ("aft", "mix"):
             self._setup_aft_baselines()
-        else:
-            raise ValueError(f"Unknown model_type '{model_type}'. Options: 'ph', 'aft'.")
 
     def _setup_ph_baselines(self):
-        self.baseline_pool: Dict[str, BaselineHazard] = {}
+        broad = (self.baseline_param_prior == "broad")
+        self.ph_baseline_pool: Dict[str, BaselineHazard] = {}
         if "weibull" in self.baseline_types:
-            self.baseline_pool["weibull"] = WeibullHazard()
+            self.ph_baseline_pool["weibull"] = WeibullHazard(
+                k_log_min=np.log(0.4), k_log_max=np.log(3.5),
+            ) if broad else WeibullHazard()
         if "gompertz" in self.baseline_types:
-            self.baseline_pool["gompertz"] = GompertzHazard()
+            self.ph_baseline_pool["gompertz"] = GompertzHazard(
+                gamma_log_min=np.log(0.005), gamma_log_max=np.log(0.5),
+            ) if broad else GompertzHazard()
         if "loglogistic" in self.baseline_types:
-            self.baseline_pool["loglogistic"] = LogLogisticHazard()
+            self.ph_baseline_pool["loglogistic"] = LogLogisticHazard(
+                beta_log_min=np.log(0.5), beta_log_max=np.log(4.0),
+            ) if broad else LogLogisticHazard()
         if "lognormal" in self.baseline_types:
-            self.baseline_pool["lognormal"] = LogNormalHazard()
-        if not self.baseline_pool:
+            if broad:
+                self.ph_baseline_pool["lognormal"] = LogNormalHazard(
+                    mu_min=-2.0, mu_max=2.0, sigma_log_min=np.log(0.4), sigma_log_max=np.log(2.0),
+                )
+            else:
+                self.ph_baseline_pool["lognormal"] = LogNormalHazard()
+        if not self.ph_baseline_pool:
             raise ValueError(f"No valid baseline types in {self.baseline_types}")
-        self.sampler = ProportionalHazardSampler(
-            baseline_pool=self.baseline_pool,
+        self.ph_sampler = ProportionalHazardSampler(
+            baseline_pool=self.ph_baseline_pool,
             beta=self.beta,
             baseline_mode=self.baseline_mode,
             max_time=self.max_time,
@@ -723,22 +882,47 @@ class SurvivalSCMPrior(SCMPrior):
         )
 
     def _setup_aft_baselines(self):
-        self.baseline_pool: Dict[str, AFTBaselineHazard] = {}
+        broad = (self.baseline_param_prior == "broad")
+        self.aft_baseline_pool: Dict[str, AFTBaselineHazard] = {}
         if "weibull" in self.baseline_types:
-            self.baseline_pool["weibull"] = WeibullAFT()
+            self.aft_baseline_pool["weibull"] = WeibullAFT(
+                k_log_min=np.log(0.4), k_log_max=np.log(3.5),
+            ) if broad else WeibullAFT()
         if "loglogistic" in self.baseline_types:
-            self.baseline_pool["loglogistic"] = LogLogisticAFT()
+            self.aft_baseline_pool["loglogistic"] = LogLogisticAFT(
+                beta_log_min=np.log(0.5), beta_log_max=np.log(4.0),
+            ) if broad else LogLogisticAFT()
         if "lognormal" in self.baseline_types:
-            self.baseline_pool["lognormal"] = LogNormalAFT()
-        if not self.baseline_pool:
+            if broad:
+                self.aft_baseline_pool["lognormal"] = LogNormalAFT(
+                    mu_min=-2.0, mu_max=2.0, sigma_log_min=np.log(0.4), sigma_log_max=np.log(2.0),
+                )
+            else:
+                self.aft_baseline_pool["lognormal"] = LogNormalAFT()
+        if not self.aft_baseline_pool:
             raise ValueError(f"No valid AFT baseline types in {self.baseline_types}")
-        self.sampler = AcceleratedFailureTimeSampler(
-            baseline_pool=self.baseline_pool,
+        self.aft_sampler = AcceleratedFailureTimeSampler(
+            baseline_pool=self.aft_baseline_pool,
             beta=self.beta,
             baseline_mode=self.baseline_mode,
             max_time=self.max_time,
             u_eps=self.u_eps,
         )
+
+    @staticmethod
+    def _sample_seq_len(min_seq_len, max_seq_len, log=False, rng=None):
+        """Return a sequence length, handling the fixed-length case identically.
+
+        When ``min_seq_len == max_seq_len``, returns that value directly
+        without calling any random sampler, so callers don't need to
+        special-case fixed-length datasets.
+        """
+        if rng is None:
+            rng = np.random
+        if min_seq_len is not None and min_seq_len == max_seq_len:
+            return max_seq_len
+        # Delegate to the parent class method (handles log-uniform etc.)
+        return None  # signal to use parent behavior
 
     @staticmethod
     def _regression_sanity_check(y: Tensor, train_size: int, min_std: float = 1e-6) -> bool:
@@ -793,7 +977,16 @@ class SurvivalSCMPrior(SCMPrior):
             X, d = self.delete_unique_features(X, d)
             if (d > 0).all() and self._regression_sanity_check(y, params["train_size"]):
                 y_flat = y.squeeze(0)
-                t, delta, t_event = self.sampler.sample(
+                beta_eff = params.get("beta_eff", self.beta)
+                time_scale = params.get("time_scale", 1.0)
+                sampler_type = params.get("sampler_type", "ph")
+
+                if sampler_type == "ph":
+                    sampler = self.ph_sampler
+                else:
+                    sampler = self.aft_sampler
+
+                t, delta, t_event = sampler.sample(
                     y=y_flat,
                     baseline_name=params["baseline_type"],
                     baseline_params=params["baseline_params"],
@@ -802,7 +995,13 @@ class SurvivalSCMPrior(SCMPrior):
                     censor_scale=params["censor_scale"],
                     censoring_strategy=self.censoring_strategy,
                     target_event_rate=params.get("target_event_rate"),
+                    beta_eff=beta_eff,
                 )
+
+                # Apply time scale multiplier
+                if time_scale != 1.0:
+                    t_event = _finite_positive_time(t_event * time_scale, self.max_time)
+                    t = _finite_positive_time(t * time_scale, self.max_time)
 
                 X_out = X.squeeze(0)
                 d_out = d.squeeze(0)
@@ -840,9 +1039,12 @@ class SurvivalSCMPrior(SCMPrior):
         global_train_size = None
 
         if not self.seq_len_per_gp:
-            global_seq_len = self.sample_seq_len(
-                self.min_seq_len, self.max_seq_len, log=self.log_seq_len, replay_small=self.replay_small
-            )
+            if self.min_seq_len is not None and self.min_seq_len == self.max_seq_len:
+                global_seq_len = self.max_seq_len
+            else:
+                global_seq_len = self.sample_seq_len(
+                    self.min_seq_len, self.max_seq_len, log=self.log_seq_len, replay_small=self.replay_small
+                )
             global_train_size = self.sample_train_size(self.min_train_size, self.max_train_size, global_seq_len)
 
         rng = np.random.default_rng()
@@ -854,16 +1056,44 @@ class SurvivalSCMPrior(SCMPrior):
 
             group_sampled_hp = self.hp_sampling()
             group_baseline_type = self.baseline_mode
+
+            # Determine sampler type and pool per GP group
+            if self.model_type == "mix":
+                group_sampler_type = "ph" if np.random.random() < 0.5 else "aft"
+            else:
+                group_sampler_type = self.model_type
+
+            # Sample beta_eff if using log-uniform
+            if self.beta_sampling == "log_uniform":
+                group_beta_eff = float(np.exp(np.random.uniform(np.log(self.min_beta), np.log(self.max_beta))))
+            else:
+                group_beta_eff = self.beta
+
+            # Sample time scale
+            if self.time_scale_sampling == "log_uniform":
+                group_time_scale = float(np.exp(np.random.uniform(np.log(self.min_time_scale), np.log(self.max_time_scale))))
+            else:
+                group_time_scale = 1.0
+
+            # Select the correct baseline pool for this group
+            if group_sampler_type == "ph":
+                pool = self.ph_baseline_pool
+            else:
+                pool = self.aft_baseline_pool
+
             if group_baseline_type == "mix":
-                names = list(self.baseline_pool.keys())
+                names = list(pool.keys())
                 group_baseline_type = names[int(rng.integers(0, len(names)))]
-            group_baseline_params = self.baseline_pool[group_baseline_type].sample_params(rng)
+            group_baseline_params = pool[group_baseline_type].sample_params(rng)
             group_censor_scale = float(np.random.uniform(self.min_censor_scale, self.max_censor_scale))
 
             if self.seq_len_per_gp:
-                gp_seq_len = self.sample_seq_len(
-                    self.min_seq_len, self.max_seq_len, log=self.log_seq_len, replay_small=self.replay_small
-                )
+                if self.min_seq_len is not None and self.min_seq_len == self.max_seq_len:
+                    gp_seq_len = self.max_seq_len
+                else:
+                    gp_seq_len = self.sample_seq_len(
+                        self.min_seq_len, self.max_seq_len, log=self.log_seq_len, replay_small=self.replay_small
+                    )
                 gp_train_size = self.sample_train_size(self.min_train_size, self.max_train_size, gp_seq_len)
                 gp_max_features = self.adjust_max_features(gp_seq_len, self.max_features)
             else:
@@ -904,10 +1134,13 @@ class SurvivalSCMPrior(SCMPrior):
                         "num_features": subgp_num_features,
                         "num_classes": ds_num_classes,
                         "device": self.device,
+                        "sampler_type": group_sampler_type,
                         "baseline_type": group_baseline_type,
                         "baseline_params": group_baseline_params,
                         "censor_scale": group_censor_scale,
                         "target_event_rate": target_event_rate,
+                        "beta_eff": group_beta_eff,
+                        "time_scale": group_time_scale,
                         "min_event_rate": self.min_event_rate,
                         "max_event_rate": self.max_event_rate,
                         "_rng": rng,
