@@ -22,6 +22,77 @@ DEFAULT_RAW_TIME_MAX = 1e30
 MIN_RAW_TIME = 1e-8
 
 
+def calibrate_censor_scale_by_quantile(
+    t_event: Tensor,
+    c_base: Tensor,
+    target_event_rate: float,
+    eps: float = 1e-12,
+) -> tuple[float, dict]:
+    """Find the censoring scale that achieves a target event rate under strict ``<``.
+
+    Computes per-subject ratios ``r = t_event / c_base``, sorts them, then
+    searches over candidate thresholds (midpoints between adjacent sorted
+    ratios) to find the one whose strict-``<`` empirical event rate is
+    closest to ``target_event_rate``.
+
+    Parameters
+    ----------
+    t_event : Tensor, shape ``(n,)``
+        Event times (already sanitized via ``_finite_positive_time``).
+    c_base : Tensor, shape ``(n,)``
+        Base censoring times (same).
+    target_event_rate : float, in (0, 1)
+        Desired fraction of events.
+    eps : float, default=1e-12
+        Clamp the returned scale to at least this value.
+
+    Returns
+    -------
+    censor_scale : float
+        Threshold that (approximately) achieves the target rate.
+    diagnostics : dict
+        Target, achieved rate, scale, absolute error, and method info.
+    """
+    r = (t_event / c_base.clamp_min(eps)).reshape(-1)
+    r_sorted = torch.sort(r, stable=True).values
+    n = r_sorted.numel()
+
+    # Build candidate thresholds: midpoints between adjacent ratios.
+    # For n subjects there are n+1 achievable strict-< regimes:
+    #   s < r[0]        → 0 events
+    #   r[0] < s < r[1] → 1 event
+    #   …
+    #   r[n-1] < s      → n events
+    # Choosing the midpoint between adjacent ratios gives us the
+    # threshold that yields exactly k events when ratios are unique.
+    candidates = []
+    candidates.append(r_sorted[0] * 0.5)  # below smallest
+    for i in range(n - 1):
+        candidates.append(0.5 * (r_sorted[i] + r_sorted[i + 1]))
+    candidates.append(r_sorted[-1] * 2.0)  # above largest
+
+    best_scale = candidates[0]
+    best_err = float("inf")
+    best_achieved = 0.0
+    for s in candidates:
+        achieved = (r < s).float().mean().item()
+        err = abs(achieved - target_event_rate)
+        if err < best_err:
+            best_err = err
+            best_scale = s
+            best_achieved = achieved
+
+    best_scale = max(float(best_scale), eps)
+    diagnostics = {
+        "target": target_event_rate,
+        "achieved": best_achieved,
+        "scale": best_scale,
+        "absolute_error": best_err,
+        "n_subjects": n,
+    }
+    return best_scale, diagnostics
+
+
 def _finite_positive_time(t: Tensor, max_time: float) -> Tensor:
     """Sanitize raw time tensor: clamp to [MIN_RAW_TIME, max_time].
 
@@ -258,6 +329,9 @@ class ProportionalHazardSampler:
         rng: np.random.Generator,
         device: str = "cpu",
         censor_scale: float = 1.0,
+        censoring_strategy: str = "uniform_scale",
+        target_event_rate: float | None = None,
+        calibration_eps: float = 1e-12,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Convert continuous regression target into event times.
 
@@ -274,8 +348,15 @@ class ProportionalHazardSampler:
         device : str, default="cpu"
             Device for tensor operations.
         censor_scale : float, default=1.0
-            Multiplier for censoring times.  Larger values → fewer censored
-            observations.  Sampled per GP group by ``SurvivalSCMPrior``.
+            Multiplier for censoring times under ``uniform_scale`` strategy.
+        censoring_strategy : str, default="uniform_scale"
+            ``"uniform_scale"`` uses the provided ``censor_scale`` directly.
+            ``"target_event_rate"`` calibrates the scale from ``t_event / c_base``
+            to hit ``target_event_rate``.
+        target_event_rate : float or None, default=None
+            Required when ``censoring_strategy="target_event_rate"``.
+        calibration_eps : float, default=1e-12
+            Epsilon for the calibration helper.
 
         Returns
         -------
@@ -298,10 +379,21 @@ class ProportionalHazardSampler:
         t_event = baseline.inverse_cdf(u, log_risk, baseline_params)
         t_event = _finite_positive_time(t_event, self.max_time)
 
+        # Generate independent base censoring times (no covariate effect)
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
-        c = baseline.inverse_cdf(u_c, torch.zeros_like(log_risk), baseline_params)
-        c = c * censor_scale
+        c_base = baseline.inverse_cdf(u_c, torch.zeros_like(log_risk), baseline_params)
+        c_base = _finite_positive_time(c_base, self.max_time)
+
+        if censoring_strategy == "target_event_rate":
+            assert target_event_rate is not None, (
+                "target_event_rate is required when censoring_strategy='target_event_rate'"
+            )
+            censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                t_event, c_base, target_event_rate, eps=calibration_eps,
+            )
+
+        c = c_base * censor_scale
         c = _finite_positive_time(c, self.max_time)
 
         t_obs = torch.minimum(t_event, c)
@@ -475,6 +567,9 @@ class AcceleratedFailureTimeSampler:
         rng: np.random.Generator,
         device: str = "cpu",
         censor_scale: float = 1.0,
+        censoring_strategy: str = "uniform_scale",
+        target_event_rate: float | None = None,
+        calibration_eps: float = 1e-12,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         if baseline_name == "mix":
             names = list(self.baseline_pool.keys())
@@ -488,9 +583,21 @@ class AcceleratedFailureTimeSampler:
         t_event = t0 * torch.exp(-self.beta * y)
         t_event = _finite_positive_time(t_event, self.max_time)
 
+        # Generate independent base censoring times (no covariate effect)
         u_c = torch.rand(y.shape, device=device)
         u_c = u_c.clamp(min=self.u_eps, max=1.0 - self.u_eps)
-        c = baseline.baseline_time(u_c, baseline_params) * censor_scale
+        c_base = baseline.baseline_time(u_c, baseline_params)
+        c_base = _finite_positive_time(c_base, self.max_time)
+
+        if censoring_strategy == "target_event_rate":
+            assert target_event_rate is not None, (
+                "target_event_rate is required when censoring_strategy='target_event_rate'"
+            )
+            censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                t_event, c_base, target_event_rate, eps=calibration_eps,
+            )
+
+        c = c_base * censor_scale
         c = _finite_positive_time(c, self.max_time)
 
         t_obs = torch.minimum(t_event, c)
@@ -538,7 +645,8 @@ class SurvivalSCMPrior(SCMPrior):
                  baseline_types=None, baseline_mode: str = "mix",
                  max_time: float = DEFAULT_RAW_TIME_MAX, u_eps: float = 1e-6,
                  min_censor_scale: float = 1.0, max_censor_scale: float = 5.0,
-                 min_event_rate: float = 0.40, max_event_rate: float = 1.0,
+                 min_event_rate: float = 0.40, max_event_rate: float = 0.90,
+                 censoring_strategy: str = "target_event_rate",
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = model_type
@@ -551,6 +659,7 @@ class SurvivalSCMPrior(SCMPrior):
         self.max_censor_scale = max_censor_scale
         self.min_event_rate = min_event_rate
         self.max_event_rate = max_event_rate
+        self.censoring_strategy = censoring_strategy
         if model_type == "ph":
             self._setup_ph_baselines()
         elif model_type == "aft":
@@ -608,7 +717,8 @@ class SurvivalSCMPrior(SCMPrior):
 
     @staticmethod
     def _survival_sanity_check(t: Tensor, delta: Tensor, min_time: float = 1e-6,
-                               min_event_rate: float = 0.40, max_event_rate: float = 1.0) -> bool:
+                               min_event_rate: float = 0.05, max_event_rate: float = 0.98,
+                               calibrating: bool = False) -> bool:
         if not torch.isfinite(t).all():
             return False
         if (t <= min_time).any():
@@ -616,8 +726,14 @@ class SurvivalSCMPrior(SCMPrior):
         if t.std() < min_time:
             return False
         event_rate = delta.float().mean().item()
-        if event_rate < min_event_rate or event_rate > max_event_rate:
-            return False
+        if calibrating:
+            # Under target_event_rate strategy, the calibration chooses the
+            # scale to hit the requested rate — use broad hard bounds only.
+            if event_rate < 0.05 or event_rate > 0.98:
+                return False
+        else:
+            if event_rate < min_event_rate or event_rate > max_event_rate:
+                return False
         return True
 
     @torch.no_grad()
@@ -649,6 +765,8 @@ class SurvivalSCMPrior(SCMPrior):
                     rng=params["_rng"],
                     device=self.device,
                     censor_scale=params["censor_scale"],
+                    censoring_strategy=self.censoring_strategy,
+                    target_event_rate=params.get("target_event_rate"),
                 )
 
                 X_out = X.squeeze(0)
@@ -658,6 +776,7 @@ class SurvivalSCMPrior(SCMPrior):
                     t, delta,
                     min_event_rate=params["min_event_rate"],
                     max_event_rate=params["max_event_rate"],
+                    calibrating=(self.censoring_strategy == "target_event_rate"),
                 ):
                     return X_out, t, delta, t_event, d_out
 
@@ -734,6 +853,12 @@ class SurvivalSCMPrior(SCMPrior):
                     else:
                         ds_num_classes = 2
 
+                    target_event_rate = None
+                    if self.censoring_strategy == "target_event_rate":
+                        target_event_rate = float(
+                            np.random.uniform(self.min_event_rate, self.max_event_rate)
+                        )
+
                     params = {
                         **self.fixed_hp,
                         "seq_len": gp_seq_len,
@@ -747,6 +872,7 @@ class SurvivalSCMPrior(SCMPrior):
                         "baseline_type": group_baseline_type,
                         "baseline_params": group_baseline_params,
                         "censor_scale": group_censor_scale,
+                        "target_event_rate": target_event_rate,
                         "min_event_rate": self.min_event_rate,
                         "max_event_rate": self.max_event_rate,
                         "_rng": rng,

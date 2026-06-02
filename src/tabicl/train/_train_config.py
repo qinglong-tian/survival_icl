@@ -239,7 +239,9 @@ def build_parser():
     parser.add_argument("--min_censor_scale", type=float, default=1.0, help="[Survival] Minimum censoring scale factor")
     parser.add_argument("--max_censor_scale", type=float, default=5.0, help="[Survival] Maximum censoring scale factor")
     parser.add_argument("--min_event_rate", type=float, default=0.40, help="[Survival] Minimum event rate per dataset")
-    parser.add_argument("--max_event_rate", type=float, default=1.0, help="[Survival] Maximum event rate per dataset")
+    parser.add_argument("--max_event_rate", type=float, default=0.90, help="[Survival] Maximum event rate per dataset (target range upper bound under target_event_rate)")
+    parser.add_argument("--censoring_strategy", type=str, default="target_event_rate", choices=["target_event_rate", "uniform_scale"],
+        help="[Survival] 'target_event_rate' calibrates scale per dataset; 'uniform_scale' uses U[min_censor_scale, max_censor_scale]")
     parser.add_argument("--survival_raw_time_max", type=float, default=1e30, help="[Survival] Numerical safety maximum for raw generated times")
     parser.add_argument("--survival_time_eps", type=float, default=1e-8, help="[Survival] Epsilon for log-time scaling")
     parser.add_argument("--survival_time_min_scale", type=float, default=0.1, help="[Survival] Minimum robust log-time scale")

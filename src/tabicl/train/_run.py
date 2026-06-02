@@ -402,7 +402,8 @@ class Trainer:
                     min_censor_scale=getattr(self.config, "min_censor_scale", 1.0),
                     max_censor_scale=getattr(self.config, "max_censor_scale", 5.0),
                     min_event_rate=getattr(self.config, "min_event_rate", 0.40),
-                    max_event_rate=getattr(self.config, "max_event_rate", 1.0),
+                    max_event_rate=getattr(self.config, "max_event_rate", 0.90),
+                    censoring_strategy=getattr(self.config, "censoring_strategy", "target_event_rate"),
                     device=self.config.prior_device,
                     n_jobs=1,
                 )

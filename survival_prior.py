@@ -113,9 +113,17 @@ class SurvivalPriorDataset(IterableDataset):
         Minimum fraction of observed events required for a valid dataset.
         Datasets with fewer events are rejected and regenerated.
 
-    max_event_rate: float = 1.0
-        Maximum fraction of observed events allowed.  Datasets with more
-        events (i.e. too few censored) are rejected and regenerated.
+    max_event_rate: float = 0.90
+        Maximum fraction of observed events allowed.  Under
+        ``target_event_rate``, defines the upper bound of the sampled
+        target range rather than a rejection threshold.
+
+    censoring_strategy : str, default="target_event_rate"
+        ``"target_event_rate"`` calibrates a per-dataset censoring scale
+        from the ratio ``t_event / c_base`` to achieve a target event rate
+        sampled from ``U[min_event_rate, max_event_rate]``.
+        ``"uniform_scale"`` uses ``censor_scale ~ U[min_censor_scale, max_censor_scale]``
+        as before.
 
     scm_fixed_hp : dict, default=DEFAULT_FIXED_HP
         Fixed hyperparameters for SCM priors.
@@ -158,7 +166,8 @@ class SurvivalPriorDataset(IterableDataset):
         min_censor_scale: float = 1.0,
         max_censor_scale: float = 5.0,
         min_event_rate: float = 0.40,
-        max_event_rate: float = 1.0,
+        max_event_rate: float = 0.90,
+        censoring_strategy: str = "target_event_rate",
         scm_fixed_hp: Dict[str, Any] = DEFAULT_FIXED_HP,
         scm_sampled_hp: Dict[str, Any] = DEFAULT_SAMPLED_HP,
         n_jobs: int = 1,
@@ -196,6 +205,7 @@ class SurvivalPriorDataset(IterableDataset):
         self.max_censor_scale = max_censor_scale
         self.min_event_rate = min_event_rate
         self.max_event_rate = max_event_rate
+        self.censoring_strategy = censoring_strategy
 
         if prior_type == "dummy":
             self.prior = DummyPrior(
@@ -223,6 +233,7 @@ class SurvivalPriorDataset(IterableDataset):
                 max_censor_scale=max_censor_scale,
                 min_event_rate=min_event_rate,
                 max_event_rate=max_event_rate,
+                censoring_strategy=censoring_strategy,
                 fixed_hp=scm_fixed_hp,
                 sampled_hp=scm_sampled_hp,
             )
@@ -276,6 +287,7 @@ class SurvivalPriorDataset(IterableDataset):
             f"  max_time: {self.max_time}\n"
             f"  u_eps: {self.u_eps}\n"
             f"  censor_scale: {self.min_censor_scale} - {self.max_censor_scale}\n"
+            f"  censoring_strategy: {self.censoring_strategy}\n"
             f"  event_rate: {self.min_event_rate} - {self.max_event_rate}\n"
             f"  device: {self.device}\n"
             f")"
@@ -321,6 +333,7 @@ class SaveSurvivalPriorDataset:
             max_censor_scale=self.args.max_censor_scale,
             min_event_rate=self.args.min_event_rate,
             max_event_rate=self.args.max_event_rate,
+            censoring_strategy=self.args.censoring_strategy,
             scm_fixed_hp=DEFAULT_FIXED_HP,
             scm_sampled_hp=DEFAULT_SAMPLED_HP,
             n_jobs=self.args.n_jobs,
@@ -353,6 +366,7 @@ class SaveSurvivalPriorDataset:
             "max_censor_scale": self.args.max_censor_scale,
             "min_event_rate": self.args.min_event_rate,
             "max_event_rate": self.args.max_event_rate,
+            "censoring_strategy": self.args.censoring_strategy,
         }
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
@@ -749,8 +763,15 @@ if __name__ == "__main__":
         help="Minimum fraction of observed events per dataset"
     )
     parser.add_argument(
-        "--max_event_rate", type=float, default=1.0,
-        help="Maximum fraction of observed events per dataset"
+        "--max_event_rate", type=float, default=0.90,
+        help="Maximum fraction of observed events per dataset (target range upper bound under target_event_rate)"
+    )
+    parser.add_argument(
+        "--censoring_strategy",
+        type=str,
+        default="target_event_rate",
+        choices=["target_event_rate", "uniform_scale"],
+        help="Censoring strategy: target_event_rate calibrates scale per dataset, uniform_scale samples censor_scale from U[min,max]",
     )
     parser.add_argument(
         "--device", type=str, default="cpu", choices=["cpu", "cuda"], help="Device for generation"
