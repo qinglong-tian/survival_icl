@@ -85,6 +85,49 @@ def test_survival_time_scaler_is_scale_invariant_and_round_trips_unclipped_times
     assert torch.allclose(scaler.inverse_time(z), t_query, atol=1e-5)
 
 
+def test_preprocessing_helper_scales_context_only():
+    """Context z-values must be invariant to extreme query times.
+
+    Calls ``standardize_survival_micro_batch`` with identical context but
+    wildly different query values — standardized context must match, proving
+    the helper fits exclusively on context.
+    """
+    scaler_kwargs = dict(eps=1e-8, min_scale=0.1, z_min=-6.0, z_max=6.0)
+
+    ctx = torch.tensor([1.0, 2.0, 4.0])
+    delta_ctx = torch.ones_like(ctx)
+    # Pad to batch dim and add one fake test position for the helper's shape
+    t_train = ctx.unsqueeze(0)             # (1, 3)
+    d_train = delta_ctx.unsqueeze(0)
+
+    # Two extreme query sets
+    q1 = torch.tensor([[8.0, 16.0]])       # benign
+    q2 = torch.tensor([[1e10, 1e-10]])     # extreme — must not affect scaling
+
+    # Helper splits at train_sizes_ds = seq_len // 2 internally,
+    # but the full row is passed as t_train + remainder as t_test.
+    # We pass the full row as both t_train and t_test (train_sizes=3,
+    # query_sizes=2) so the scaler fits on the first 3 positions only.
+    out1 = standardize_survival_micro_batch(
+        t_train, d_train, q1, torch.ones_like(q1), q1,
+        train_sizes_ds=torch.tensor([3]), query_sizes_ds=torch.tensor([2]),
+        scaler_kwargs=scaler_kwargs,
+    )
+    out2 = standardize_survival_micro_batch(
+        t_train, d_train, q2, torch.ones_like(q2), q2,
+        train_sizes_ds=torch.tensor([3]), query_sizes_ds=torch.tensor([2]),
+        scaler_kwargs=scaler_kwargs,
+    )
+    z_ctx1 = out1[0][0, :3]  # context positions (unmasked)
+    z_ctx2 = out2[0][0, :3]
+    assert torch.allclose(z_ctx1, z_ctx2, atol=1e-5)
+
+    # Context-only fit reference
+    ref = SurvivalTimeScaler(**scaler_kwargs).fit(ctx, delta_ctx)
+    z_ref, _ = ref.transform_observed(ctx, delta_ctx)
+    assert torch.allclose(z_ctx1, z_ref, atol=1e-5)
+
+
 def test_survival_time_scaler_handles_extremes_and_administrative_censoring():
     scaler = SurvivalTimeScaler().fit(torch.tensor([1.0, 2.0, 4.0]), torch.ones(3))
 

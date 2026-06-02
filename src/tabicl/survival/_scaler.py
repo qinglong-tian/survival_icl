@@ -161,7 +161,12 @@ def standardize_survival_micro_batch(
     query_sizes_ds: Tensor,
     scaler_kwargs: dict[str, float],
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Apply context-only KM-hybrid scaling to a survival micro-batch."""
+    """Apply context-only KM-hybrid scaling to a survival micro-batch.
+
+    Fit scaler on ``(t_train, delta_train)`` (context only), then transform
+    context, query, and ``t_event_test`` with the same scaler.  Query times
+    never influence ``loc`` or ``scale``.
+    """
     t_train_z = torch.empty_like(t_train)
     delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
     t_test_z = torch.empty_like(t_test)
