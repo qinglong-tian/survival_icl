@@ -566,7 +566,7 @@ class Trainer:
         # Restore survival metadata if present
         surv_meta = checkpoint.get("survival_metadata", None)
         if surv_meta is not None and self.survival:
-            if surv_meta.get("time_scale") == "context_robust_log":
+            if surv_meta.get("time_scale") == "km_hybrid_log":
                 from tabicl.survival import TimeBinner
                 self.binner = TimeBinner(
                     bin_edges=surv_meta["binner_edges"].to(self.config.device),
@@ -616,7 +616,7 @@ class Trainer:
                 "binner_means": self.binner.bin_means,
                 "num_bins": self.binner.num_bins,
                 "task": "survival",
-                "time_scale": "context_robust_log",
+                "time_scale": "km_hybrid_log",
                 "time_scaler": getattr(self, "survival_time_scaler_config", None),
             }
         torch.save(checkpoint, checkpoint_path)
@@ -771,7 +771,7 @@ class Trainer:
         train_sizes_ds,
         query_sizes_ds,
     ):
-        from tabicl.survival import SurvivalTimeScaler
+        from tabicl.survival import standardize_survival_micro_batch
 
         scaler_kwargs = getattr(self, "survival_time_scaler_config", {
             "eps": getattr(self.config, "survival_time_eps", 1e-8),
@@ -779,40 +779,16 @@ class Trainer:
             "z_min": getattr(self.config, "survival_time_z_min", -6.0),
             "z_max": getattr(self.config, "survival_time_z_max", 6.0),
         })
-
-        t_train_z = torch.empty_like(t_train)
-        delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
-        t_test_z = torch.empty_like(t_test)
-        delta_test_z = torch.empty_like(delta_test, dtype=torch.float32)
-        t_event_test_z = torch.empty_like(t_event_test)
-
-        context_pos = torch.arange(t_train.shape[1], device=t_train.device)
-        query_pos = torch.arange(t_test.shape[1], device=t_test.device)
-
-        for ds_idx in range(t_train.shape[0]):
-            context_mask = context_pos < train_sizes_ds[ds_idx]
-            if not context_mask.any():
-                context_mask = context_mask.clone()
-                context_mask[0] = True
-
-            scaler = SurvivalTimeScaler(**scaler_kwargs).fit(
-                t_train[ds_idx], valid_mask=context_mask,
-            )
-
-            ctx_t, ctx_delta = scaler.transform_observed(t_train[ds_idx], delta_train[ds_idx])
-            ctx_t = torch.where(context_mask, ctx_t, torch.zeros_like(ctx_t))
-            ctx_delta = torch.where(context_mask, ctx_delta, torch.zeros_like(ctx_delta))
-            t_train_z[ds_idx] = ctx_t
-            delta_train_z[ds_idx] = ctx_delta
-
-            query_mask = query_pos < query_sizes_ds[ds_idx]
-            q_t, q_delta = scaler.transform_observed(t_test[ds_idx], delta_test[ds_idx])
-            q_event = scaler.transform_event(t_event_test[ds_idx])
-            t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
-            delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
-            t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
-
-        return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z
+        return standardize_survival_micro_batch(
+            t_train,
+            delta_train,
+            t_test,
+            delta_test,
+            t_event_test,
+            train_sizes_ds,
+            query_sizes_ds,
+            scaler_kwargs,
+        )
 
     def _run_micro_batch_survival(self, micro_batch, micro_batch_idx, num_micro_batches):
         (micro_X, micro_t, micro_delta, micro_t_event,

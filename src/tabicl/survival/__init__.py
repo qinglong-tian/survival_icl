@@ -5,16 +5,17 @@ a hybrid loss function that combines the discrete survival negative log-likeliho
 (on observables `(t_obs, delta)`) with a pinball imputation loss on the privileged
 counterfactual event times `t_event` (available only at training time in synthetic
 data).  The model is trained on standardized log-times; future inference code
-should fit :class:`SurvivalTimeScaler` on the in-context observed times, transform
-support labels before calling the model, interpret hazards on the standardized
-``TimeBinner``, and convert requested outputs back with ``inverse_time``.
+should fit :class:`SurvivalTimeScaler` on the in-context observed outcomes
+``(t_obs, delta)``, transform support labels before calling the model, interpret
+hazards on the standardized ``TimeBinner``, and convert requested outputs back
+with ``inverse_time``.
 
 Usage sketch::
 
     from tabicl.survival import SurvivalTimeScaler, TimeBinner, DiscreteTimeSurvivalHead, HybridSurvivalLoss
 
-    # Fit on context observed times only, then use fixed standardized bins.
-    scaler = SurvivalTimeScaler().fit(t_context)
+    # Fit on context observed outcomes only, then use fixed standardized bins.
+    scaler = SurvivalTimeScaler().fit(t_context, delta_context)
     z_context, delta_context = scaler.transform_observed(t_context, delta_context)
     binner = TimeBinner.from_standardized_range(num_bins=50)
 
@@ -34,13 +35,16 @@ Usage sketch::
 from __future__ import annotations
 
 from tabicl.survival._head import TimeBinner, DiscreteTimeSurvivalHead
+from tabicl.survival._km import km_quantiles
 from tabicl.survival._loss import HybridSurvivalLoss, censored_pinball_loss
-from tabicl.survival._scaler import SurvivalTimeScaler
+from tabicl.survival._scaler import SurvivalTimeScaler, standardize_survival_micro_batch
 
 __all__ = [
     "TimeBinner",
     "DiscreteTimeSurvivalHead",
     "HybridSurvivalLoss",
     "censored_pinball_loss",
+    "km_quantiles",
     "SurvivalTimeScaler",
+    "standardize_survival_micro_batch",
 ]

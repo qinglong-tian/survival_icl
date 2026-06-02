@@ -2,28 +2,81 @@ from __future__ import annotations
 
 import torch
 
-from tabicl.survival import SurvivalTimeScaler, TimeBinner
+from tabicl.survival import (
+    SurvivalTimeScaler,
+    TimeBinner,
+    km_quantiles,
+    standardize_survival_micro_batch,
+)
 
 
-def test_survival_time_scaler_matches_median_iqr_formula():
-    t_context = torch.exp(torch.tensor([0.0, 1.0, 3.0]))
-    scaler = SurvivalTimeScaler().fit(t_context)
+def test_km_quantiles_no_censoring_use_step_convention():
+    log_y = torch.log(torch.tensor([1.0, 2.0, 4.0, 8.0]))
+    delta = torch.ones(4)
 
-    log_t = torch.log(t_context)
-    q25, q75 = torch.quantile(log_t, torch.tensor([0.25, 0.75]))
-    expected_loc = log_t.median()
-    expected_scale = ((q75 - q25) / 1.349).clamp_min(0.1)
+    q25, q50, q75 = km_quantiles(log_y, delta)
+
+    expected = torch.log(torch.tensor([1.0, 2.0, 4.0]))
+    assert torch.allclose(torch.stack([q25, q50, q75]), expected)
+
+
+def test_km_quantiles_heavy_censoring_returns_nan_for_unreached_quantiles():
+    log_y = torch.log(torch.tensor([1.0, 2.0, 4.0]))
+    delta = torch.tensor([1.0, 0.0, 0.0])
+
+    q25, q50, q75 = km_quantiles(log_y, delta)
+
+    assert torch.isfinite(q25)
+    assert torch.isnan(q50)
+    assert torch.isnan(q75)
+
+
+def test_km_quantiles_ties_events_jump_before_risk_set_removal():
+    log_y = torch.log(torch.tensor([1.0, 1.0, 2.0, 2.0, 4.0]))
+    delta = torch.tensor([1.0, 1.0, 1.0, 0.0, 1.0])
+
+    q25, q50, q75 = km_quantiles(log_y, delta)
+
+    expected = torch.log(torch.tensor([1.0, 2.0, 4.0]))
+    assert torch.allclose(torch.stack([q25, q50, q75]), expected)
+
+
+def test_survival_time_scaler_uses_km_median_iqr_when_available():
+    t_context = torch.tensor([1.0, 2.0, 4.0, 8.0])
+    delta = torch.ones_like(t_context)
+    scaler = SurvivalTimeScaler().fit(t_context, delta)
+
+    expected_loc = torch.log(torch.tensor(2.0))
+    expected_scale = (torch.log(torch.tensor(4.0)) - torch.log(torch.tensor(1.0))) / 1.349
 
     assert torch.allclose(scaler.loc, expected_loc)
     assert torch.allclose(scaler.scale, expected_scale)
+    assert scaler.metadata["location_source"] == "km"
+    assert scaler.metadata["scale_source"] == "km"
+
+
+def test_survival_time_scaler_falls_back_when_km_quantiles_unavailable():
+    t_context = torch.tensor([1.0, 2.0, 4.0])
+    delta = torch.tensor([1.0, 0.0, 0.0])
+    scaler = SurvivalTimeScaler().fit(t_context, delta)
+
+    log_t = torch.log(t_context)
+    q25, q50, q75 = torch.quantile(log_t, torch.tensor([0.25, 0.5, 0.75]))
+    expected_scale = ((q75 - q25) / 1.349).clamp_min(0.1)
+
+    assert torch.allclose(scaler.loc, q50)
+    assert torch.allclose(scaler.scale, expected_scale)
+    assert scaler.metadata["location_source"] == "observed_fallback"
+    assert scaler.metadata["scale_source"] == "observed_fallback"
 
 
 def test_survival_time_scaler_is_scale_invariant_and_round_trips_unclipped_times():
     t_context = torch.tensor([1.0, 2.0, 4.0, 8.0, 16.0])
     t_query = torch.tensor([2.0, 4.0, 8.0])
 
-    scaler = SurvivalTimeScaler().fit(t_context)
-    scaled_scaler = SurvivalTimeScaler().fit(t_context * 365.0)
+    delta = torch.ones_like(t_context)
+    scaler = SurvivalTimeScaler().fit(t_context, delta)
+    scaled_scaler = SurvivalTimeScaler().fit(t_context * 365.0, delta)
 
     z = scaler.transform_time(t_query)
     z_scaled = scaled_scaler.transform_time(t_query * 365.0)
@@ -33,7 +86,7 @@ def test_survival_time_scaler_is_scale_invariant_and_round_trips_unclipped_times
 
 
 def test_survival_time_scaler_handles_extremes_and_administrative_censoring():
-    scaler = SurvivalTimeScaler().fit(torch.tensor([1.0, 2.0, 4.0]))
+    scaler = SurvivalTimeScaler().fit(torch.tensor([1.0, 2.0, 4.0]), torch.ones(3))
 
     z = scaler.transform_time(torch.tensor([1e-12, 1e6, 1e30]))
     assert torch.isfinite(z).all()
@@ -74,8 +127,9 @@ def test_scaler_is_context_only_and_scale_invariant():
     t_qry_a = torch.tensor([8.0, 1e30])
     t_qry_b = torch.tensor([2920.0, 365.0e30])
 
-    scaler_a = SurvivalTimeScaler(**scaler_kwargs).fit(t_ctx_a)
-    scaler_b = SurvivalTimeScaler(**scaler_kwargs).fit(t_ctx_b)
+    delta_ctx = torch.ones_like(t_ctx_a)
+    scaler_a = SurvivalTimeScaler(**scaler_kwargs).fit(t_ctx_a, delta_ctx)
+    scaler_b = SurvivalTimeScaler(**scaler_kwargs).fit(t_ctx_b, delta_ctx)
 
     # Context: scale-invariant z-values
     z_ctx_a, _ = scaler_a.transform_observed(t_ctx_a, torch.ones_like(t_ctx_a))
@@ -95,3 +149,34 @@ def test_scaler_is_context_only_and_scale_invariant():
         assert torch.isfinite(z).all()
         assert ((z >= -6.0) & (z <= 6.0)).all()
 
+
+def test_survival_preprocessing_helper_uses_context_delta_and_stays_in_range():
+    scaler_kwargs = {
+        "eps": 1e-8,
+        "min_scale": 0.1,
+        "z_min": -6.0,
+        "z_max": 6.0,
+    }
+
+    t_train = torch.tensor([[1.0, 2.0, 4.0], [365.0, 730.0, 1460.0]])
+    delta_train = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    t_test = torch.tensor([[8.0, 1e30], [2920.0, 365.0e30]])
+    delta_test = torch.ones_like(t_test)
+    t_event_test = t_test.clone()
+    train_sizes_ds = torch.tensor([3, 3])
+    query_sizes_ds = torch.tensor([2, 2])
+
+    outputs = standardize_survival_micro_batch(
+        t_train, delta_train, t_test, delta_test, t_event_test,
+        train_sizes_ds, query_sizes_ds, scaler_kwargs,
+    )
+    t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z = outputs
+
+    for tensor in (t_train_z, t_test_z, t_event_test_z):
+        assert torch.isfinite(tensor).all()
+        assert ((tensor >= -6.0) & (tensor <= 6.0)).all()
+
+    assert torch.allclose(t_train_z[0], t_train_z[1], atol=1e-5)
+    assert torch.allclose(t_test_z[0, 0], t_test_z[1, 0], atol=1e-5)
+    assert delta_train_z.tolist() == delta_train.tolist()
+    assert delta_test_z[:, 1].tolist() == [0.0, 0.0]

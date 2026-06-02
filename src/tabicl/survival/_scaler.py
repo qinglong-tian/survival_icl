@@ -5,20 +5,22 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from tabicl.survival._km import km_quantiles
+
 
 class SurvivalTimeScaler:
-    """Robust per-task scaler for survival times.
+    """KM-hybrid per-task scaler for survival times.
 
-    The scaler is fit on context observed times only.  It maps raw positive
-    times to standardized log-time values:
+    The scaler is fit on context observed outcomes only.  It maps raw positive
+    times to standardized log-time values using KM median/IQR when available
+    and observed log-time quantiles as fallback values:
 
     ``z = clamp((log(max(t, eps)) - loc) / scale, z_min, z_max)``
 
-    where ``loc`` is the median context log-time and ``scale`` is
-    ``IQR(log_t) / 1.349`` clamped below by ``min_scale``.  At inference, fit
-    one scaler per support set, feed standardized support times to the model,
-    interpret hazards on the standardized ``TimeBinner``, and map requested
-    standardized times back with :meth:`inverse_time`.
+    At inference, fit one scaler per support set using the support
+    ``(t_obs, delta)``, feed standardized support times to the model, interpret
+    hazards on the standardized ``TimeBinner``, and map requested standardized
+    times back with :meth:`inverse_time`.
     """
 
     def __init__(
@@ -35,23 +37,79 @@ class SurvivalTimeScaler:
         self.z_max = z_max
         self.loc: Tensor | None = None
         self.scale: Tensor | None = None
+        self.metadata: dict[str, object] = {}
 
-    def fit(self, t_context: Tensor, valid_mask: Tensor | None = None) -> "SurvivalTimeScaler":
-        """Fit scaling parameters from context observed times."""
+    def fit(
+        self,
+        t_context: Tensor,
+        delta_context: Tensor,
+        valid_mask: Tensor | None = None,
+    ) -> "SurvivalTimeScaler":
+        """Fit scaling parameters from context observed outcomes."""
+        if t_context.shape != delta_context.shape:
+            raise ValueError(
+                f"t_context and delta_context must have the same shape, got {t_context.shape} and {delta_context.shape}"
+            )
         if valid_mask is not None:
-            t = t_context[valid_mask.bool()]
+            mask = valid_mask.bool()
+            t = t_context[mask]
+            delta = delta_context[mask]
         else:
             t = t_context.reshape(-1)
+            delta = delta_context.reshape(-1)
 
         log_t = torch.log(t.clamp_min(self.eps))
-        log_t = log_t[torch.isfinite(log_t)]
+        finite = torch.isfinite(log_t)
+        finite = finite & torch.isfinite(delta)
+        delta = delta[finite]
+        log_t = log_t[finite]
         if log_t.numel() == 0:
             raise ValueError("SurvivalTimeScaler.fit requires at least one finite context time.")
+        if not (((delta == 0) | (delta == 1)).all()):
+            raise ValueError("delta_context must contain only 0/1 event indicators.")
 
         log_t_f = log_t.float()
-        q25, q75 = torch.quantile(log_t_f, torch.tensor([0.25, 0.75], device=log_t_f.device))
-        self.scale = ((q75 - q25) / 1.349).clamp_min(self.min_scale)
-        self.loc = log_t_f.median()
+        q25_obs, q50_obs, q75_obs = torch.quantile(
+            log_t_f, torch.tensor([0.25, 0.5, 0.75], device=log_t_f.device)
+        )
+
+        q25_km, q50_km, q75_km = km_quantiles(log_t_f, delta.float())
+
+        if torch.isfinite(q50_km):
+            loc = q50_km
+            location_source = "km"
+        else:
+            loc = q50_obs
+            location_source = "observed_fallback"
+
+        if torch.isfinite(q25_km) and torch.isfinite(q75_km) and q75_km > q25_km:
+            q25_used, q75_used = q25_km, q75_km
+            scale_source = "km"
+        else:
+            q25_used, q75_used = q25_obs, q75_obs
+            scale_source = "observed_fallback"
+
+        scale_raw = (q75_used - q25_used) / 1.349
+        scale = scale_raw.clamp_min(self.min_scale)
+
+        self.loc = loc.to(dtype=torch.float32)
+        self.scale = scale.to(dtype=torch.float32)
+        self.metadata = {
+            "method": "km_hybrid",
+            "location_source": location_source,
+            "scale_source": scale_source,
+            "q25": float(q25_used.detach().cpu()),
+            "q50": float(loc.detach().cpu()),
+            "q75": float(q75_used.detach().cpu()),
+            "q25_km": float(q25_km.detach().cpu()),
+            "q50_km": float(q50_km.detach().cpu()),
+            "q75_km": float(q75_km.detach().cpu()),
+            "q25_obs": float(q25_obs.detach().cpu()),
+            "q50_obs": float(q50_obs.detach().cpu()),
+            "q75_obs": float(q75_obs.detach().cpu()),
+            "scale_raw": float(scale_raw.detach().cpu()),
+            "scale_was_lower_bounded": bool((scale_raw < self.min_scale).detach().cpu()),
+        }
         return self
 
     def _check_fitted(self) -> tuple[Tensor, Tensor]:
@@ -92,3 +150,48 @@ class SurvivalTimeScaler:
         scale = scale.to(device=z.device, dtype=z.dtype)
         return torch.exp(z * scale + loc)
 
+
+def standardize_survival_micro_batch(
+    t_train: Tensor,
+    delta_train: Tensor,
+    t_test: Tensor,
+    delta_test: Tensor,
+    t_event_test: Tensor,
+    train_sizes_ds: Tensor,
+    query_sizes_ds: Tensor,
+    scaler_kwargs: dict[str, float],
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Apply context-only KM-hybrid scaling to a survival micro-batch."""
+    t_train_z = torch.empty_like(t_train)
+    delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
+    t_test_z = torch.empty_like(t_test)
+    delta_test_z = torch.empty_like(delta_test, dtype=torch.float32)
+    t_event_test_z = torch.empty_like(t_event_test)
+
+    context_pos = torch.arange(t_train.shape[1], device=t_train.device)
+    query_pos = torch.arange(t_test.shape[1], device=t_test.device)
+
+    for ds_idx in range(t_train.shape[0]):
+        context_mask = context_pos < train_sizes_ds[ds_idx]
+        if not context_mask.any():
+            context_mask = context_mask.clone()
+            context_mask[0] = True
+
+        scaler = SurvivalTimeScaler(**scaler_kwargs).fit(
+            t_train[ds_idx], delta_train[ds_idx], valid_mask=context_mask,
+        )
+
+        ctx_t, ctx_delta = scaler.transform_observed(t_train[ds_idx], delta_train[ds_idx])
+        ctx_t = torch.where(context_mask, ctx_t, torch.zeros_like(ctx_t))
+        ctx_delta = torch.where(context_mask, ctx_delta, torch.zeros_like(ctx_delta))
+        t_train_z[ds_idx] = ctx_t
+        delta_train_z[ds_idx] = ctx_delta
+
+        query_mask = query_pos < query_sizes_ds[ds_idx]
+        q_t, q_delta = scaler.transform_observed(t_test[ds_idx], delta_test[ds_idx])
+        q_event = scaler.transform_event(t_event_test[ds_idx])
+        t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
+        delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
+        t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
+
+    return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z
