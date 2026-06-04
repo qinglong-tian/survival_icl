@@ -240,11 +240,17 @@ class WeibullHazard(BaselineHazard):
         if k_log_min is not None:
             self.k_min = k_log_min
             self.k_max = k_log_max
-            self._sample = lambda rng: float(np.exp(rng.uniform(self.k_min, self.k_max)))
+            self._log_uniform = True
         else:
             self.k_min = k_min if k_min is not None else 0.5
             self.k_max = k_max if k_max is not None else 3.0
-            self._sample = lambda rng: float(rng.uniform(self.k_min, self.k_max))
+            self._log_uniform = False
+
+    def _sample(self, rng: np.random.Generator) -> float:
+        if self._log_uniform:
+            return float(np.exp(rng.uniform(self.k_min, self.k_max)))
+        else:
+            return float(rng.uniform(self.k_min, self.k_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
         return {"k": self._sample(rng)}
@@ -315,11 +321,17 @@ class LogLogisticHazard(BaselineHazard):
         if beta_log_min is not None:
             self.beta_min = beta_log_min
             self.beta_max = beta_log_max
-            self._sample = lambda rng: float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+            self._log_uniform = True
         else:
             self.beta_min = beta_min if beta_min is not None else 0.5
             self.beta_max = beta_max if beta_max is not None else 3.0
-            self._sample = lambda rng: float(rng.uniform(self.beta_min, self.beta_max))
+            self._log_uniform = False
+
+    def _sample(self, rng: np.random.Generator) -> float:
+        if self._log_uniform:
+            return float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+        else:
+            return float(rng.uniform(self.beta_min, self.beta_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
         return {"beta": self._sample(rng)}
@@ -555,10 +567,9 @@ class AFTBaselineHazard(ABC):
 
 
 class WeibullAFT(AFTBaselineHazard):
-    """Weibull AFT baseline with scale fixed at 1.
+    """Weibull AFT: T = T₀ · exp(-βy).
 
-    Baseline time: ``T_0 = (-log(U))^(1/k)``
-    Final time: ``T = T_0 * exp(-beta * y)``
+    T₀ ~ Weibull(k, 1) → baseline_time = (-log U)^{1/k}.
 
     Parameters
     ----------
@@ -575,11 +586,17 @@ class WeibullAFT(AFTBaselineHazard):
         if k_log_min is not None:
             self.k_min = k_log_min
             self.k_max = k_log_max
-            self._sample = lambda rng: float(np.exp(rng.uniform(self.k_min, self.k_max)))
+            self._log_uniform = True
         else:
             self.k_min = k_min if k_min is not None else 0.5
             self.k_max = k_max if k_max is not None else 3.0
-            self._sample = lambda rng: float(rng.uniform(self.k_min, self.k_max))
+            self._log_uniform = False
+
+    def _sample(self, rng: np.random.Generator) -> float:
+        if self._log_uniform:
+            return float(np.exp(rng.uniform(self.k_min, self.k_max)))
+        else:
+            return float(rng.uniform(self.k_min, self.k_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
         return {"k": self._sample(rng)}
@@ -636,10 +653,9 @@ class LogNormalAFT(AFTBaselineHazard):
 
 
 class LogLogisticAFT(AFTBaselineHazard):
-    """Log-logistic AFT baseline with scale fixed at 1.
+    """Log-logistic AFT: T = T₀ · exp(-βy).
 
-    Baseline time: ``T_0 = (1/U - 1)^(1/beta)``
-    Final time: ``T = T_0 * exp(-beta * y)``
+    T₀ ~ LogLogistic(β_scale, 1) → baseline_time = (1/U - 1)^{1/β}.
 
     Parameters
     ----------
@@ -656,11 +672,17 @@ class LogLogisticAFT(AFTBaselineHazard):
         if beta_log_min is not None:
             self.beta_min = beta_log_min
             self.beta_max = beta_log_max
-            self._sample = lambda rng: float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+            self._log_uniform = True
         else:
             self.beta_min = beta_min if beta_min is not None else 0.5
             self.beta_max = beta_max if beta_max is not None else 3.0
-            self._sample = lambda rng: float(rng.uniform(self.beta_min, self.beta_max))
+            self._log_uniform = False
+
+    def _sample(self, rng: np.random.Generator) -> float:
+        if self._log_uniform:
+            return float(np.exp(rng.uniform(self.beta_min, self.beta_max)))
+        else:
+            return float(rng.uniform(self.beta_min, self.beta_max))
 
     def sample_params(self, rng: np.random.Generator) -> Dict[str, float]:
         return {"beta": self._sample(rng)}
