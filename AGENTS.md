@@ -121,7 +121,7 @@ python survival_prior.py --model_type ph --num_batches 1 --batch_size 4 \
 | `survival_prior.py` | `SurvivalPriorDataset`, `SaveSurvivalPriorDataset`, `LoadSurvivalPriorDataset`, CLI |
 | `src/tabicl/prior/_survival.py` | PH/AFT samplers, baselines, `SurvivalSCMPrior`, censoring logic |
 | `inspect_censoring.py` | Diagnostic script: event rate distribution across censor scales |
-| `scripts/survival_curriculum.sh` | 3-stage generation (PH + AFT, 6 sections total) |
+| `scripts/train_survival_curriculum.sh` | Canonical 3-stage on-the-fly pretraining curriculum |
 
 ### Data Format (`get_batch()` return tuple)
 
@@ -182,7 +182,7 @@ delta = (t < c).float()  ← 1=event happened before censoring
   files still carry the field, but its value is always the full sequence length.
 
 - **TreeSCM is disabled** — `prior_type` defaults changed from `mix_scm` to `mlp_scm`
-  in `survival_prior.py` and `scripts/survival_curriculum.sh`. TreeSCM uses xgboost
+  in `survival_prior.py` and the archived `scripts/_upstream/survival_curriculum.sh`. TreeSCM uses xgboost
   internally (slow at N > 10K) and the rejection loop made it 10-100× slower than MLP.
 
 - **Generation loop is bounded** — `while True` replaced with `for _ in range(5000)`
@@ -205,9 +205,23 @@ delta = (t < c).float()  ← 1=event happened before censoring
 3. Raw times use a numerical safety max (`--max_time`, default 1e30), not a modeling horizon.
 4. Model-facing times are per-task standardized log-times fit on context observed times only, then clipped to [-6, 6].
 
-### Run Scripts (use `--n_jobs 4` for best throughput)
+### Training Script
 
-The full 3-stage curriculum: `bash scripts/survival_curriculum.sh`
-(`--min_train_size` and `--max_train_size` args removed — defaults handle it.)
-Generated data goes to `data/survival_stage[123]/` and `data/survival_aft_stage[123]/`.
-Add `--device cuda` for GPU generation (currently unsupported; use `cpu`).
+The canonical on-the-fly pretraining curriculum:
+```bash
+bash scripts/train_survival_curriculum.sh
+```
+Trains one mixed PH/AFT survival foundation model in 3 stages
+(small fixed-length → medium variable-length → large variable-length).
+All data is generated on-the-fly; no disk pre-generation is required.
+
+Optional environment overrides:
+```bash
+RUN_STAGES=1,2,3    # which stages to run
+STAGE1_STEPS=100000 # override per-stage step count
+NPROC_PER_NODE=1    # GPUs
+WANDB_MODE=offline  # online/offline/disabled
+```
+
+The previous disk-based generation script is archived at
+`scripts/_upstream/survival_curriculum.sh`.

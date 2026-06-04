@@ -809,6 +809,36 @@ class Trainer:
     def _run_micro_batch_survival(self, micro_batch, micro_batch_idx, num_micro_batches):
         (micro_X, micro_t, micro_delta, micro_t_event,
          micro_d, micro_seq_len, micro_train_size) = micro_batch
+
+        # Guard: variable-length survival micro-batches rely on GP ordering.
+        # Datasets in the same GP group share the same seq_len.  The prior
+        # returns contiguous groups; torch.split produces consecutive slices.
+        # Require micro_batch_size to cleanly divide batch_size_per_gp so
+        # each micro-batch stays within one GP group (single seq_len),
+        # preventing silent truncation of longer rows.
+        #
+        # Skip the guard when all datasets share the same seq_len:
+        #   - batch_size_per_gp >= batch_size → single GP
+        #   - min_seq_len == max_seq_len       → fixed length, every GP identical
+        if self.config.seq_len_per_gp:
+            has_fixed_len = (
+                getattr(self.config, "min_seq_len", None) is not None
+                and self.config.min_seq_len == self.config.max_seq_len
+            )
+            if not has_fixed_len:
+                mb = self.config.micro_batch_size
+                bpg = self.config.batch_size_per_gp
+                bs = self.config.batch_size  # already ceil-divided for DDP
+                if bpg < bs and bpg % mb != 0:
+                    raise ValueError(
+                        f"When seq_len_per_gp=True with variable lengths, "
+                        f"batch_size_per_gp ({bpg}) must be divisible by "
+                        f"micro_batch_size ({mb}) to keep each GP group "
+                        f"boundary aligned with micro-batches. "
+                        f"Got bpg % mb = {bpg % mb}. "
+                        f"Future hardening: support per-dataset padding masks."
+                    )
+
         seq_len, _, per_ds_seq_lens = self.validate_micro_batch(micro_seq_len, micro_train_size)
         # Survival data has train_size == seq_len (no split in the prior).
         # We override to split half/half for context/query.
