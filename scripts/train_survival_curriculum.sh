@@ -175,6 +175,10 @@ read -r -d '' SURVIVAL_FLAGS <<'EOF' || true
 --prior_type mlp_scm
 --prior_device cpu
 --min_train_size 1.0 --max_train_size 1.0
+--survival_query_supervision event
+--censor_calibration_scope context
+--survival_query_pinball_weight 0.0
+--survival_query_pinball_quantiles 0.1,0.25,0.5,0.75,0.9
 EOF
 
 # ── Shared model architecture ───────────────────────────────────────────

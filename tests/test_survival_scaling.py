@@ -213,10 +213,13 @@ def test_survival_preprocessing_helper_uses_context_delta_and_stays_in_range():
         t_train, delta_train, t_test, delta_test, t_event_test,
         train_sizes_ds, query_sizes_ds, scaler_kwargs,
     )
-    t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z = outputs
+    t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z, t_event_in_range = outputs
 
     for tensor in (t_train_z, t_test_z, t_event_test_z):
         assert torch.isfinite(tensor).all()
+    # t_event_test_z is unclipped (transform_event_target returns raw_z)
+    # — only context/query observed are clamped to [z_min, z_max]
+    for tensor in (t_train_z, t_test_z):
         assert ((tensor >= -6.0) & (tensor <= 6.0)).all()
 
     assert torch.allclose(t_train_z[0], t_train_z[1], atol=1e-5)

@@ -120,6 +120,54 @@ class Trainer:
         self.config = config
         self.survival = getattr(config, "task", "classification") == "survival"
 
+        # --- validate survival supervision settings ---
+        if self.survival:
+            self.query_supervision = getattr(config, "survival_query_supervision", "observed")
+            if self.query_supervision not in ("observed", "event"):
+                raise ValueError(
+                    f"survival_query_supervision must be 'observed' or 'event', "
+                    f"got '{self.query_supervision}'."
+                )
+            self.censor_calibration_scope = getattr(config, "censor_calibration_scope", "dataset")
+            if self.censor_calibration_scope not in ("dataset", "context"):
+                raise ValueError(
+                    f"censor_calibration_scope must be 'dataset' or 'context', "
+                    f"got '{self.censor_calibration_scope}'."
+                )
+            self.query_pinball_weight = getattr(config, "survival_query_pinball_weight", 0.0)
+            if not isinstance(self.query_pinball_weight, (int, float)) or self.query_pinball_weight < 0.0:
+                raise ValueError(
+                    f"survival_query_pinball_weight must be ≥ 0, got {self.query_pinball_weight}."
+                )
+            if self.query_supervision == "observed" and self.query_pinball_weight > 0.0:
+                raise ValueError(
+                    "survival_query_pinball_weight must be 0.0 when "
+                    "query_supervision='observed' (oracle pinball mixes objective semantics)."
+                )
+
+            raw_q = getattr(config, "survival_query_pinball_quantiles", "0.1,0.25,0.5,0.75,0.9")
+            try:
+                quantiles = [float(x.strip()) for x in raw_q.split(",") if x.strip()]
+            except ValueError:
+                raise ValueError(
+                    f"survival_query_pinball_quantiles must be comma-separated floats, "
+                    f"got '{raw_q}'."
+                )
+            if len(quantiles) < 1:
+                raise ValueError(
+                    "survival_query_pinball_quantiles must contain at least one value."
+                )
+            if any(q <= 0.0 or q >= 1.0 for q in quantiles):
+                raise ValueError(
+                    f"All pinball quantiles must be in (0, 1), got {quantiles}."
+                )
+            if quantiles != sorted(set(quantiles)):
+                raise ValueError(
+                    f"Pinball quantiles must be unique and strictly increasing, "
+                    f"got {quantiles}."
+                )
+            self.query_pinball_quantiles = quantiles
+
         self.configure_ddp()
         self.configure_wandb()
 
@@ -576,6 +624,7 @@ class Trainer:
                     min_event_rate=getattr(self.config, "min_event_rate", 0.40),
                     max_event_rate=getattr(self.config, "max_event_rate", 0.90),
                     censoring_strategy=getattr(self.config, "censoring_strategy", "target_event_rate"),
+                    calibration_scope=getattr(self.config, "censor_calibration_scope", "dataset"),
                     device=self.config.prior_device,
                     n_jobs=1,
                 )
@@ -872,6 +921,24 @@ class Trainer:
         self.curr_step = checkpoint["curr_step"]
         print(f"Resuming training at step {self.curr_step}")
 
+        # --- resume guard: reject mismatched survival supervision settings ---
+        if self.survival and "survival_metadata" in checkpoint:
+            meta = checkpoint["survival_metadata"]
+            for attr, key, default in [
+                ("query_supervision", "query_supervision", "observed"),
+                ("censor_calibration_scope", "censor_calibration_scope", "dataset"),
+                ("query_pinball_weight", "query_pinball_weight", 0.0),
+            ]:
+                saved = meta.get(key, default)
+                cli = getattr(self, attr, None)
+                if cli is not None and saved != cli:
+                    raise RuntimeError(
+                        f"Checkpoint was trained with {key}={saved!r}, "
+                        f"but CLI specifies {key}={cli!r}. "
+                        f"Use matching settings to resume, or set "
+                        f"--only_load_model True to initialize a new objective."
+                    )
+
     # --- deprecated: kept for backward compat with external callers ---
     def load_checkpoint(self):
         """Deprecated.  Use :meth:`restore_training_state`."""
@@ -897,6 +964,10 @@ class Trainer:
                 "task": "survival",
                 "time_scale": "km_hybrid_log",
                 "time_scaler": getattr(self, "survival_time_scaler_config", None),
+                "query_supervision": getattr(self, "query_supervision", "observed"),
+                "censor_calibration_scope": getattr(self, "censor_calibration_scope", "dataset"),
+                "query_pinball_weight": getattr(self, "query_pinball_weight", 0.0),
+                "query_pinball_quantiles": getattr(self, "query_pinball_quantiles", [0.1, 0.25, 0.5, 0.75, 0.9]),
             }
         torch.save(checkpoint, checkpoint_path)
 
@@ -1047,10 +1118,17 @@ class Trainer:
         delta_train,
         t_test,
         delta_test,
-        train_sizes_ds,
-        query_sizes_ds,
+        t_event_test=None,
+        train_sizes_ds=None,
+        query_sizes_ds=None,
+        *,
+        return_event_info=False,
     ):
-        """Delegate to the shared ``standardize_survival_micro_batch`` (NLL-only, no t_event)."""
+        """Delegate to the shared ``standardize_survival_micro_batch``.
+
+        Set ``t_event_test`` and ``return_event_info=True`` for oracle
+        event-time supervision.  All other callers get the legacy 4-tuple.
+        """
         from tabicl.survival._scaler import standardize_survival_micro_batch
 
         scaler_kwargs = getattr(self, "survival_time_scaler_config", {
@@ -1059,28 +1137,21 @@ class Trainer:
             "z_min": getattr(self.config, "survival_time_z_min", -6.0),
             "z_max": getattr(self.config, "survival_time_z_max", 6.0),
         })
-        t_train_z, delta_train_z, t_test_z, delta_test_z, _ = standardize_survival_micro_batch(
-            t_train, delta_train, t_test, delta_test, None,
-            train_sizes_ds, query_sizes_ds, scaler_kwargs,
-        )
+        t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_z, t_event_in_range = \
+            standardize_survival_micro_batch(
+                t_train, delta_train, t_test, delta_test, t_event_test,
+                train_sizes_ds, query_sizes_ds, scaler_kwargs,
+            )
+        if return_event_info:
+            return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_z, t_event_in_range
         return t_train_z, delta_train_z, t_test_z, delta_test_z
 
     def _run_micro_batch_survival(self, micro_batch, micro_batch_idx, num_micro_batches):
         # Unpack 7-tuple from prior: (X, t, delta, t_event, d, seq_len, train_size)
-        # t_event is present for dataset/checkpoint compatibility but ignored in NLL-only training.
-        (micro_X, micro_t, micro_delta, _micro_t_event,
+        (micro_X, micro_t, micro_delta, micro_t_event,
          micro_d, micro_seq_len, micro_train_size) = micro_batch
 
         # Guard: variable-length survival micro-batches rely on GP ordering.
-        # Datasets in the same GP group share the same seq_len.  The prior
-        # returns contiguous groups; torch.split produces consecutive slices.
-        # Require micro_batch_size to cleanly divide batch_size_per_gp so
-        # each micro-batch stays within one GP group (single seq_len),
-        # preventing silent truncation of longer rows.
-        #
-        # Skip the guard when all datasets share the same seq_len:
-        #   - batch_size_per_gp >= batch_size → single GP
-        #   - min_seq_len == max_seq_len       → fixed length, every GP identical
         if self.config.seq_len_per_gp:
             has_fixed_len = (
                 getattr(self.config, "min_seq_len", None) is not None
@@ -1105,19 +1176,20 @@ class Trainer:
         # We override to split half/half for context/query.
         train_size = seq_len // 2
         micro_X, micro_t = self.align_micro_batch(micro_X, micro_t, micro_d, seq_len)
-        # Align delta same as t
+        # Align delta and t_event same as t
         if micro_delta.shape[1] > seq_len:
             micro_delta = micro_delta[:, :seq_len]
+        if micro_t_event.shape[1] > seq_len:
+            micro_t_event = micro_t_event[:, :seq_len]
 
         micro_X = micro_X.to(self.config.device)
         micro_t = micro_t.to(self.config.device)
         micro_delta = micro_delta.to(self.config.device)
+        micro_t_event = micro_t_event.to(self.config.device)
         micro_d = micro_d.to(self.config.device)
         per_ds_seq_lens = per_ds_seq_lens.to(self.config.device)
 
         # Per-dataset context/query sizes for padding masking
-        # After padding, each row uses first `train_size_ds` for context,
-        # next `seq_len_ds - train_size_ds` for query, rest is padding.
         train_sizes_ds = (per_ds_seq_lens / 2).long()  # (B,) half as context
         query_sizes_ds = per_ds_seq_lens - train_sizes_ds  # (B,)
 
@@ -1125,10 +1197,31 @@ class Trainer:
         t_test = micro_t[:, train_size:]   # (B, T - train_size) — query (includes padding)
         delta_train = micro_delta[:, :train_size]
         delta_test = micro_delta[:, train_size:]
+        t_event_test = micro_t_event[:, train_size:]  # (B, T - train_size) — oracle query events
 
-        t_train, delta_train, t_test, delta_test = self._standardize_survival_micro_batch(
-            t_train, delta_train, t_test, delta_test, train_sizes_ds, query_sizes_ds,
-        )
+        event_mode = self.query_supervision == "event"
+        if event_mode:
+            # Oracle event supervision: use unclipped standardized t_event
+            # for the NLL target (all query rows are events: delta=1).
+            t_train, delta_train, t_test, _, t_event_z, t_event_in_range = \
+                self._standardize_survival_micro_batch(
+                    t_train, delta_train, t_test, delta_test,
+                    t_event_test=t_event_test,
+                    train_sizes_ds=train_sizes_ds,
+                    query_sizes_ds=query_sizes_ds,
+                    return_event_info=True,
+                )
+            delta_test_z = torch.ones_like(t_test)  # all query rows are events
+        else:
+            t_train, delta_train, t_test, delta_test = \
+                self._standardize_survival_micro_batch(
+                    t_train, delta_train, t_test, delta_test,
+                    train_sizes_ds=train_sizes_ds,
+                    query_sizes_ds=query_sizes_ds,
+                )
+            delta_test_z = delta_test
+            t_event_z = None
+            t_event_in_range = None
 
         if self.ddp:
             self.model.require_backward_grad_sync = micro_batch_idx == num_micro_batches - 1
@@ -1138,30 +1231,72 @@ class Trainer:
             # h_raw: (B, T_test, K) — flatten for loss
             B, T_test, K = h_raw.shape
             h_raw_flat = h_raw.reshape(-1, K)
-            t_test_flat = t_test.reshape(-1)
-            delta_test_flat = delta_test.reshape(-1)
 
             # Build padding mask: valid positions are those within query_sizes_ds
             position_idx = torch.arange(T_test, device=self.config.device).unsqueeze(0)  # (1, T_test)
             valid_mask = position_idx < query_sizes_ds.unsqueeze(1)  # (B, T_test)
             valid_mask_flat = valid_mask.reshape(-1)  # (B * T_test,)
 
-            # Compute NLL in float32 under AMP for numerical stability
-            bin_idx = self.binner.bin_index(t_test_flat)  # (B * T_test,) long
-            loss = _masked_discrete_survival_nll(
-                h_raw_flat, bin_idx, delta_test_flat, valid_mask_flat,
-            )
+            if event_mode:
+                # Event NLL: bin index from unclipped t_event_z,
+                # delta = 1 for all valid query rows.
+                t_test_flat = t_event_z.reshape(-1)
+                bin_idx = self.binner.bin_index(t_test_flat)  # (B * T_test,) long
+                surv_nll = _masked_discrete_survival_nll(
+                    h_raw_flat, bin_idx, delta_test_z.reshape(-1), valid_mask_flat,
+                )
+                loss = surv_nll
+
+                # Optional pinball on oracle event targets
+                if self.query_pinball_weight > 0.0:
+                    from tabicl.survival import oracle_query_pinball_loss
+                    t_event_in_range_flat = t_event_in_range.reshape(-1)
+                    pinball = oracle_query_pinball_loss(
+                        h_raw_flat, t_test_flat, self.binner,
+                        in_range=t_event_in_range_flat,
+                        valid_mask=valid_mask_flat,
+                    )
+                    loss = surv_nll + self.query_pinball_weight * pinball
+
+                # Log underflow/overflow rates
+                if valid_mask_flat.any():
+                    v = valid_mask_flat
+                    ir = t_event_in_range_flat
+                    n_valid = v.sum().item()
+                    n_in_range = (v & ir).sum().item()
+                    underflow_rate = (t_test_flat[v] < self.binner.bin_edges[0]).float().mean().item()
+                    overflow_rate = (t_test_flat[v] > self.binner.bin_edges[-1]).float().mean().item()
+                else:
+                    n_valid = n_in_range = underflow_rate = overflow_rate = 0.0
+            else:
+                # Observed mode (legacy): censored query NLL
+                t_test_flat = t_test.reshape(-1)
+                delta_test_flat = delta_test_z.reshape(-1)
+                bin_idx = self.binner.bin_index(t_test_flat)  # (B * T_test,) long
+                loss = _masked_discrete_survival_nll(
+                    h_raw_flat, bin_idx, delta_test_flat, valid_mask_flat,
+                )
+                surv_nll = loss
+                pinball = None
+
             # Keep loss in float32 — GradScaler handles mixed-precision loss
-            # connected to float16 model outputs.  Casting back to float16 can
-            # overflow (e.g. 100000 → inf in float16).
 
         scaled_loss = loss / num_micro_batches
         self.scaler.scale(scaled_loss).backward()
 
         with torch.no_grad():
             micro_results = {
-                "surv_nll": loss.item() / num_micro_batches,
+                "surv_nll": surv_nll.item() / num_micro_batches,
             }
+            if event_mode:
+                micro_results["query_event_underflow_rate"] = underflow_rate
+                micro_results["query_event_overflow_rate"] = overflow_rate
+                micro_results["query_event_in_range"] = (
+                    n_in_range / n_valid if n_valid > 0 else 0.0
+                )
+                if pinball is not None:
+                    micro_results["query_pinball"] = pinball.item() / num_micro_batches
+                    micro_results["total_loss"] = loss.item() / num_micro_batches
 
         return micro_results
 

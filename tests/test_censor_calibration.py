@@ -5,6 +5,10 @@ import torch
 from tabicl.prior._survival import (
     MIN_RAW_TIME,
     SurvivalSCMPrior,
+    WeibullHazard,
+    WeibullAFT,
+    ProportionalHazardSampler,
+    AcceleratedFailureTimeSampler,
     calibrate_censor_scale_by_quantile,
 )
 
@@ -80,6 +84,65 @@ def test_survival_sanity_retains_independent_variance_guard():
     assert not SurvivalSCMPrior._survival_sanity_check(t, delta)
 
 
+def test_context_calibration_invariant_to_query_rows():
+    """Changing query rows must not change censoring scale."""
+    import numpy as np
+
+    # PH sampler
+    baseline_ph = {"weibull": WeibullHazard()}
+    sampler_ph = ProportionalHazardSampler(baseline_ph, beta=1.0, max_time=1e30, u_eps=1e-6)
+    sampler_ph._calibration_prefix = 5
+
+    y = torch.randn(10)
+    rng = np.random.default_rng(42)
+    params = {"k": 1.0}
+
+    # Two batches: same context (first 5), different query (last 5)
+    y1 = y.clone()
+    y2 = y1.clone()
+    y2[5:] = torch.randn(5) * 100  # wildly different query rows, same context
+
+    # Reset torch RNG so that uniform draws inside sample() are identical
+    torch.manual_seed(42)
+    t1, d1, te1 = sampler_ph.sample(
+        y1, "weibull", params, rng, device="cpu",
+        censoring_strategy="target_event_rate",
+        target_event_rate=0.5,
+    )
+    torch.manual_seed(42)
+    t2, d2, te2 = sampler_ph.sample(
+        y2, "weibull", params, rng, device="cpu",
+        censoring_strategy="target_event_rate",
+        target_event_rate=0.5,
+    )
+
+    # Context rows (first 5) must have identical t_obs and delta
+    assert torch.allclose(t1[:5], t2[:5])
+    assert torch.equal(d1[:5], d2[:5])
+
+    # AFT sampler
+    baseline_aft = {"weibull": WeibullAFT()}
+    sampler_aft = AcceleratedFailureTimeSampler(
+        baseline_aft, beta=1.0, max_time=1e30, u_eps=1e-6,
+    )
+    sampler_aft._calibration_prefix = 5
+
+    torch.manual_seed(43)
+    t3, d3, te3 = sampler_aft.sample(
+        y1, "weibull", params, rng, device="cpu",
+        censoring_strategy="target_event_rate",
+        target_event_rate=0.5,
+    )
+    torch.manual_seed(43)
+    t4, d4, te4 = sampler_aft.sample(
+        y2, "weibull", params, rng, device="cpu",
+        censoring_strategy="target_event_rate",
+        target_event_rate=0.5,
+    )
+    assert torch.allclose(t3[:5], t4[:5])
+    assert torch.equal(d3[:5], d4[:5])
+
+
 if __name__ == "__main__":
     test_exact_k_events_achieved()
     test_below_smallest_yields_zero()
@@ -90,4 +153,5 @@ if __name__ == "__main__":
     test_survival_sanity_accepts_sanitized_time_floor()
     test_survival_sanity_rejects_time_below_sanitized_floor()
     test_survival_sanity_retains_independent_variance_guard()
-    print("All 9 tests passed.")
+    test_context_calibration_invariant_to_query_rows()
+    print("All 10 tests passed.")

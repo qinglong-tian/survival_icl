@@ -173,6 +173,90 @@ def censored_pinball_loss(
 
 
 # ---------------------------------------------------------------------------
+# Oracle query-event pinball loss
+# ---------------------------------------------------------------------------
+
+
+def oracle_query_pinball_loss(
+    h_raw: Tensor,
+    t_event_z: Tensor,
+    binner: TimeBinner,
+    in_range: Tensor,
+    valid_mask: Tensor | None = None,
+    tau_levels: Tensor | None = None,
+) -> Tensor:
+    """Pinball loss on oracle query event times for ALL valid query rows.
+
+    Unlike :func:`censored_pinball_loss`, this function:
+
+    - Applies to **every** valid query row (all are unconditional events).
+    - Uses unclipped ``t_event_z`` from :meth:`SurvivalTimeScaler.transform_event_target`.
+    - Excludes targets where ``in_range`` is ``False`` (outside ``[z_min, z_max]``)
+      from pinball because predicted quantiles are capped at the horizon.
+    - Does NOT clip targets — out-of-range rows are excluded, not repaired.
+
+    Parameters
+    ----------
+    h_raw : Tensor, shape ``(N, K)``
+        Raw hazard logits per observation.
+
+    t_event_z : Tensor, shape ``(N,)``
+        Unclipped standardized log-times ``raw_z(t_event)`` from the
+        context-fitted scaler.  May contain values outside ``[z_min, z_max]``.
+
+    binner : TimeBinner
+        Provides ``quantile_at()`` for extracting predicted quantiles from
+        the discrete survival CDF.
+
+    in_range : Tensor, shape ``(N,)``, bool
+        ``z_min <= t_event_z <= z_max``.  Produced by
+        ``SurvivalTimeScaler.transform_event_target``.
+
+    valid_mask : Tensor, optional, shape ``(N,)``, bool
+        Padding mask.  Row ``i`` is evaluated only when ``valid_mask[i]`` is
+        ``True``.  If ``None``, all rows are assumed valid.
+
+    tau_levels : Tensor, optional, shape ``(Q,)``
+        Quantile probability levels.  Default: ``[0.1, 0.2, ..., 0.9]``.
+
+    Returns
+    -------
+    Tensor
+        Scalar pinball loss, averaged over selected τ levels and valid
+        in-range rows.  Returns a differentiable zero **on the correct
+        device** when there are no valid in-range rows.
+    """
+    if tau_levels is None:
+        tau_levels = torch.tensor(_DEFAULT_TAU_LEVELS, device=h_raw.device, dtype=h_raw.dtype)
+
+    if valid_mask is not None:
+        pinball_mask = valid_mask.bool() & in_range
+    else:
+        pinball_mask = in_range
+
+    n_eligible = pinball_mask.sum()
+
+    if n_eligible == 0:
+        # Return a differentiable zero on the same device/dtype as h_raw
+        # so that the computation graph is preserved.
+        return (h_raw.sum() * 0.0).to(dtype=h_raw.dtype)
+
+    # Extract quantiles Q(τ) for the eligible observations
+    h_eligible = h_raw[pinball_mask]          # (N_eligible, K)
+    t_eligible = t_event_z[pinball_mask]      # (N_eligible,)
+
+    quantiles = binner.quantile_at(h_eligible, tau_levels)  # (N_eligible, Q)
+
+    # Pinball loss: ρ_τ(t - Q(τ)) = max(τ·(t - Q), (τ-1)·(t - Q))
+    diff = t_eligible.unsqueeze(-1) - quantiles  # (N_eligible, Q)
+    tau = tau_levels.view(1, -1)                  # (1, Q)
+    pinball = torch.maximum(tau * diff, (tau - 1.0) * diff)  # (N_eligible, Q)
+
+    # Mean over quantile levels, then mean over eligible observations
+    return pinball.mean()
+
+
+# ---------------------------------------------------------------------------
 # Hybrid loss
 # ---------------------------------------------------------------------------
 

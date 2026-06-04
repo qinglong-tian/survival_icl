@@ -516,6 +516,8 @@ class SavePriorDataset:
             "min_train_size": self.args.min_train_size,
             "max_train_size": self.args.max_train_size,
             "replay_small": self.args.replay_small,
+            "calibration_scope": getattr(self.args, "calibration_scope", "dataset"),
+            "survival_model_type": getattr(self.args, "survival_model_type", None),
         }
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)

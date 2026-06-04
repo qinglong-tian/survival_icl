@@ -143,6 +143,44 @@ class SurvivalTimeScaler:
         """Transform privileged event times for synthetic imputation loss."""
         return self.transform_time(t_event)
 
+    def transform_event_target(self, t_event: Tensor) -> tuple[Tensor, Tensor]:
+        """Transform oracle query event times for loss supervision.
+
+        Returns unclipped standardized log-times ``z_raw`` so that
+        out-of-range targets can be identified.  Unlike
+        :meth:`transform_observed`, this does *not* administratively
+        censor any observation — every valid target remains an event.
+
+        Parameters
+        ----------
+        t_event : Tensor
+            True event times (must be finite and > 0).
+
+        Returns
+        -------
+        z_raw : Tensor
+            ``raw_z(t_event)`` — may be outside ``[z_min, z_max]``.
+            Underflow/overflow values are still valid event-NLL targets
+            (mapped to edge bins by ``TimeBinner.bin_index``).
+
+        in_range : Tensor, bool
+            ``z_min <= z_raw <= z_max``.  Out-of-range targets are
+            excluded from pinball loss because predicted quantiles are
+            capped at the finite horizon.
+
+        Raises
+        ------
+        ValueError
+            If any ``t_event`` is non-finite or ≤ 0.
+        """
+        if not torch.all(torch.isfinite(t_event) & (t_event > 0)):
+            raise ValueError(
+                "t_event targets must be finite and strictly positive."
+            )
+        z = self.raw_z(t_event)
+        in_range = (z >= self.z_min) & (z <= self.z_max)
+        return z, in_range
+
     def inverse_time(self, z: Tensor) -> Tensor:
         """Map standardized log-time back to raw time units."""
         loc, scale = self._check_fitted()
@@ -160,21 +198,33 @@ def standardize_survival_micro_batch(
     train_sizes_ds: Tensor,
     query_sizes_ds: Tensor,
     scaler_kwargs: dict[str, float],
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor | None]:
     """Apply context-only KM-hybrid scaling to a survival micro-batch.
 
     Fit scaler on ``(t_train, delta_train)`` (context only), then transform
     context, query, and optionally ``t_event_test`` with the same scaler.
     Query times never influence ``loc`` or ``scale``.
 
-    When ``t_event_test`` is ``None`` (NLL-only training), the fifth return
-    element is ``None``.
+    When ``t_event_test`` is ``None`` (NLL-only training), the fifth and
+    sixth return elements are ``None``.
+
+    Returns
+    -------
+    t_train_z, delta_train_z, t_test_z, delta_test_z : Tensor
+        Standardized context and query tensors.
+    t_event_z_raw : Tensor or None
+        Unclipped standardized event times (from ``transform_event_target``).
+        May contain values outside ``[z_min, z_max]``.
+    t_event_in_range : Tensor or None, bool
+        Mask where ``z_min <= t_event_z_raw <= z_max``.  Out-of-range
+        targets are excluded from pinball loss.
     """
     t_train_z = torch.empty_like(t_train)
     delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
     t_test_z = torch.empty_like(t_test)
     delta_test_z = torch.empty_like(delta_test, dtype=torch.float32)
     t_event_test_z = torch.empty_like(t_event_test) if t_event_test is not None else None
+    t_event_in_range = torch.empty_like(t_event_test, dtype=torch.bool) if t_event_test is not None else None
 
     context_pos = torch.arange(t_train.shape[1], device=t_train.device)
     query_pos = torch.arange(t_test.shape[1], device=t_test.device)
@@ -199,8 +249,9 @@ def standardize_survival_micro_batch(
         q_t, q_delta = scaler.transform_observed(t_test[ds_idx], delta_test[ds_idx])
         t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
         delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
-        if t_event_test is not None and t_event_test_z is not None:
-            q_event = scaler.transform_event(t_event_test[ds_idx])
-            t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
+        if t_event_test is not None and t_event_test_z is not None and t_event_in_range is not None:
+            q_event_z, q_in_range = scaler.transform_event_target(t_event_test[ds_idx])
+            t_event_test_z[ds_idx] = torch.where(query_mask, q_event_z, torch.zeros_like(q_event_z))
+            t_event_in_range[ds_idx] = torch.where(query_mask, q_in_range, torch.zeros_like(q_in_range))
 
-    return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z
+    return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z, t_event_in_range

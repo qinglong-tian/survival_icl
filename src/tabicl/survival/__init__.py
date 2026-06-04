@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from tabicl.survival._head import TimeBinner, DiscreteTimeSurvivalHead
 from tabicl.survival._km import km_quantiles
-from tabicl.survival._loss import HybridSurvivalLoss, censored_pinball_loss, discrete_survival_nll
+from tabicl.survival._loss import (
+    HybridSurvivalLoss,
+    censored_pinball_loss,
+    discrete_survival_nll,
+    oracle_query_pinball_loss,
+)
 from tabicl.survival._scaler import SurvivalTimeScaler, standardize_survival_micro_batch
 
 __all__ = [
@@ -36,6 +41,7 @@ __all__ = [
     "HybridSurvivalLoss",
     "censored_pinball_loss",
     "discrete_survival_nll",
+    "oracle_query_pinball_loss",
     "km_quantiles",
     "SurvivalTimeScaler",
     "standardize_survival_micro_batch",

@@ -259,6 +259,27 @@ def build_parser():
         "--pretrained_path", type=str, default=None,
         help="[Survival] Path to pretrained TabICL checkpoint for encoder initialization (HF Hub if None)"
     )
+    parser.add_argument(
+        "--survival_query_supervision", type=str, default="observed",
+        choices=["observed", "event"],
+        help="[Survival] 'observed' = censored query NLL (legacy). 'event' = oracle event-time NLL."
+    )
+    parser.add_argument(
+        "--censor_calibration_scope", type=str, default="dataset",
+        choices=["dataset", "context"],
+        help="[Survival] 'dataset' = calibrate censoring on full dataset (legacy). "
+             "'context' = calibrate on context rows only."
+    )
+    parser.add_argument(
+        "--survival_query_pinball_weight", type=float, default=0.0,
+        help="[Survival] Weight λ on oracle-query pinball loss. 0.0 = NLL only. "
+             "Must be 0.0 when query_supervision=observed."
+    )
+    parser.add_argument(
+        "--survival_query_pinball_quantiles", type=str, default="0.1,0.25,0.5,0.75,0.9",
+        help="[Survival] Comma-separated quantile levels for oracle pinball loss. "
+             "Must be unique, strictly increasing, and in (0, 1)."
+    )
 
     ###########################################################################
     ###### Checkpointing ######################################################

@@ -450,11 +450,21 @@ class ProportionalHazardSampler:
                     "target_event_rate is required when "
                     "censoring_strategy='target_event_rate'"
                 )
-            censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                _finite_positive_time(t_event_raw, self.max_time),
-                _finite_positive_time(c_base, self.max_time),
-                target_event_rate, eps=calibration_eps,
-            )
+            t_event_clean = _finite_positive_time(t_event_raw, self.max_time)
+            c_base_clean = _finite_positive_time(c_base, self.max_time)
+            # Context-only calibration: fit on prefix rows, apply to all.
+            calib_prefix = getattr(self, "_calibration_prefix", None)
+            if calib_prefix is not None:
+                censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                    t_event_clean[:calib_prefix],
+                    c_base_clean[:calib_prefix],
+                    target_event_rate, eps=calibration_eps,
+                )
+            else:
+                censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                    t_event_clean, c_base_clean,
+                    target_event_rate, eps=calibration_eps,
+                )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
                 f"Unknown censoring_strategy '{censoring_strategy}'. "
@@ -699,11 +709,21 @@ class AcceleratedFailureTimeSampler:
                     "target_event_rate is required when "
                     "censoring_strategy='target_event_rate'"
                 )
-            censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                _finite_positive_time(t_event_raw, self.max_time),
-                _finite_positive_time(c_base, self.max_time),
-                target_event_rate, eps=calibration_eps,
-            )
+            t_event_clean = _finite_positive_time(t_event_raw, self.max_time)
+            c_base_clean = _finite_positive_time(c_base, self.max_time)
+            # Context-only calibration: fit on prefix rows, apply to all.
+            calib_prefix = getattr(self, "_calibration_prefix", None)
+            if calib_prefix is not None:
+                censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                    t_event_clean[:calib_prefix],
+                    c_base_clean[:calib_prefix],
+                    target_event_rate, eps=calibration_eps,
+                )
+            else:
+                censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                    t_event_clean, c_base_clean,
+                    target_event_rate, eps=calibration_eps,
+                )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
                 f"Unknown censoring_strategy '{censoring_strategy}'. "
@@ -786,6 +806,7 @@ class SurvivalSCMPrior(SCMPrior):
                  min_censor_scale: float = 1.0, max_censor_scale: float = 5.0,
                  min_event_rate: float = 0.40, max_event_rate: float = 0.90,
                  censoring_strategy: str = "target_event_rate",
+                 calibration_scope: str = "dataset",
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = model_type
@@ -841,6 +862,12 @@ class SurvivalSCMPrior(SCMPrior):
                 "Options: 'target_event_rate', 'uniform_scale'."
             )
         self.censoring_strategy = censoring_strategy
+        if calibration_scope not in ("dataset", "context"):
+            raise ValueError(
+                f"Unknown calibration_scope '{calibration_scope}'. "
+                "Options: 'dataset', 'context'."
+            )
+        self.calibration_scope = calibration_scope
         if model_type not in ("ph", "aft", "mix"):
             raise ValueError(
                 f"Unknown model_type '{model_type}'. Options: 'ph', 'aft', 'mix'."
@@ -1022,6 +1049,15 @@ class SurvivalSCMPrior(SCMPrior):
                     sampler = self.ph_sampler
                 else:
                     sampler = self.aft_sampler
+
+                # Context-only calibration: fit censoring scale on the
+                # first seq_len//2 rows (context), apply to all rows.
+                if self.calibration_scope == "context":
+                    sample_seq_len = y_flat.shape[0]
+                    calib_prefix = sample_seq_len // 2
+                    sampler._calibration_prefix = calib_prefix
+                else:
+                    sampler._calibration_prefix = None
 
                 t, delta, t_event = sampler.sample(
                     y=y_flat,
