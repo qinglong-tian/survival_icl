@@ -1254,23 +1254,29 @@ class Trainer:
                 t_event_in_range_flat = t_event_in_range.reshape(-1)
                 if self.query_pinball_weight > 0.0:
                     from tabicl.survival import oracle_query_pinball_loss
+                    tau = torch.tensor(
+                        self.query_pinball_quantiles,
+                        device=h_raw_flat.device,
+                        dtype=h_raw_flat.dtype,
+                    )
                     pinball = oracle_query_pinball_loss(
                         h_raw_flat, t_test_flat, self.binner,
                         in_range=t_event_in_range_flat,
                         valid_mask=valid_mask_flat,
+                        tau_levels=tau,
                     )
                     loss = surv_nll + self.query_pinball_weight * pinball
 
-                # Log underflow/overflow rates
+                # Log underflow/overflow counts
                 if valid_mask_flat.any():
                     v = valid_mask_flat
                     ir = t_event_in_range_flat
                     n_valid = v.sum().item()
                     n_in_range = (v & ir).sum().item()
-                    underflow_rate = (t_test_flat[v] < self.binner.bin_edges[0]).float().mean().item()
-                    overflow_rate = (t_test_flat[v] > self.binner.bin_edges[-1]).float().mean().item()
+                    n_underflow = (t_test_flat[v] < self.binner.bin_edges[0]).sum().item()
+                    n_overflow = (t_test_flat[v] > self.binner.bin_edges[-1]).sum().item()
                 else:
-                    n_valid = n_in_range = underflow_rate = overflow_rate = 0.0
+                    n_valid = n_in_range = n_underflow = n_overflow = 0.0
             else:
                 # Observed mode (legacy): censored query NLL
                 t_test_flat = t_test.reshape(-1)
@@ -1291,11 +1297,10 @@ class Trainer:
                 "surv_nll": surv_nll.item() / num_micro_batches,
             }
             if event_mode:
-                micro_results["query_event_underflow_rate"] = underflow_rate
-                micro_results["query_event_overflow_rate"] = overflow_rate
-                micro_results["query_event_in_range"] = (
-                    n_in_range / n_valid if n_valid > 0 else 0.0
-                )
+                micro_results["query_n_valid"] = n_valid
+                micro_results["query_n_underflow"] = n_underflow
+                micro_results["query_n_overflow"] = n_overflow
+                micro_results["query_n_in_range"] = n_in_range
                 if pinball is not None:
                     micro_results["query_pinball"] = pinball.item() / num_micro_batches
                     micro_results["total_loss"] = loss.item() / num_micro_batches
@@ -1317,6 +1322,15 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
+        if self.survival and self.query_supervision == "event" and batch[3] is None:
+            raise RuntimeError(
+                "query_supervision='event' requires t_event in every batch, "
+                "but the prior returned t_event=None.  Regenerate the disk "
+                "prior with the current survival generator, switch to "
+                "--survival_query_supervision observed, or use on-the-fly "
+                "generation."
+            )
+
         # Pad nested tensors to the same size
         batch_padded = [t.to_padded_tensor(padding=0.0) if t.is_nested else t for t in batch]
 
@@ -1326,6 +1340,14 @@ class Trainer:
 
         if self.survival:
             results = {"surv_nll": 0.0}
+            if self.query_supervision == "event":
+                results["query_n_valid"] = 0.0
+                results["query_n_underflow"] = 0.0
+                results["query_n_overflow"] = 0.0
+                results["query_n_in_range"] = 0.0
+                if self.query_pinball_weight > 0.0:
+                    results["query_pinball"] = 0.0
+                    results["total_loss"] = 0.0
         else:
             results = {"ce": 0.0, "accuracy": 0.0}
         failed_batches = 0
@@ -1349,6 +1371,20 @@ class Trainer:
                 f"({failure_ratio:.1%}) of micro-batches failed due to OOM at step {self.curr_step}. "
                 f"Please check configuration to reduce memory consumption."
             )
+
+        if self.survival and self.query_supervision == "event":
+            n_valid = results.pop("query_n_valid")
+            if n_valid > 0:
+                results["query_event_underflow_rate"] = results.pop("query_n_underflow") / n_valid
+                results["query_event_overflow_rate"] = results.pop("query_n_overflow") / n_valid
+                results["query_event_in_range"] = results.pop("query_n_in_range") / n_valid
+            else:
+                results.pop("query_n_underflow")
+                results.pop("query_n_overflow")
+                results.pop("query_n_in_range")
+                results["query_event_underflow_rate"] = 0.0
+                results["query_event_overflow_rate"] = 0.0
+                results["query_event_in_range"] = 0.0
 
         if self.config.gradient_clipping > 0:
             self.scaler.unscale_(self.optimizer)

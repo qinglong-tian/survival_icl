@@ -141,6 +141,11 @@ class SurvivalPriorDataset(IterableDataset):
         ``"uniform_scale"`` uses ``censor_scale ~ U[min_censor_scale, max_censor_scale]``
         as before.
 
+    calibration_scope : str, default="dataset"
+        ``"dataset"`` calibrates censoring scale on the full dataset.
+        ``"context"`` calibrates on the first ``seq_len // 2`` rows (context)
+        and applies the resulting scale to all rows.
+
     scm_fixed_hp : dict, default=DEFAULT_FIXED_HP
         Fixed hyperparameters for SCM priors.
 
@@ -191,6 +196,7 @@ class SurvivalPriorDataset(IterableDataset):
         min_event_rate: float = 0.40,
         max_event_rate: float = 0.90,
         censoring_strategy: str = "target_event_rate",
+        calibration_scope: str = "dataset",
         scm_fixed_hp: Dict[str, Any] = DEFAULT_FIXED_HP,
         scm_sampled_hp: Dict[str, Any] = DEFAULT_SAMPLED_HP,
         n_jobs: int = 1,
@@ -236,6 +242,7 @@ class SurvivalPriorDataset(IterableDataset):
         self.min_event_rate = min_event_rate
         self.max_event_rate = max_event_rate
         self.censoring_strategy = censoring_strategy
+        self.calibration_scope = calibration_scope
 
         if prior_type == "dummy":
             self.prior = DummyPrior(
@@ -271,6 +278,7 @@ class SurvivalPriorDataset(IterableDataset):
                 min_event_rate=min_event_rate,
                 max_event_rate=max_event_rate,
                 censoring_strategy=censoring_strategy,
+                calibration_scope=calibration_scope,
                 fixed_hp=scm_fixed_hp,
                 sampled_hp=scm_sampled_hp,
             )
@@ -380,6 +388,7 @@ class SaveSurvivalPriorDataset:
             min_event_rate=self.args.min_event_rate,
             max_event_rate=self.args.max_event_rate,
             censoring_strategy=self.args.censoring_strategy,
+            calibration_scope=getattr(self.args, "censor_calibration_scope", "dataset"),
             scm_fixed_hp=DEFAULT_FIXED_HP,
             scm_sampled_hp=DEFAULT_SAMPLED_HP,
             n_jobs=self.args.n_jobs,

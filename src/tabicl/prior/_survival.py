@@ -126,6 +126,45 @@ def _finite_positive_time(t: Tensor, max_time: float) -> Tensor:
     ).clamp(min=MIN_RAW_TIME, max=max_time)
 
 
+def _select_calibration_rows(
+    t_event: Tensor,
+    c_base: Tensor,
+    calibration_prefix: int | None,
+) -> tuple[Tensor, Tensor]:
+    """Select and validate the rows used for censor-scale calibration."""
+    if calibration_prefix is None:
+        return t_event, c_base
+
+    n = t_event.shape[0]
+    is_integer = isinstance(calibration_prefix, (int, np.integer)) and not isinstance(
+        calibration_prefix, bool,
+    )
+    if not is_integer or not 1 <= calibration_prefix <= n:
+        raise ValueError(
+            f"calibration_prefix must be an integer in [1, {n}], "
+            f"got {calibration_prefix!r}"
+        )
+    calibration_prefix = int(calibration_prefix)
+    return t_event[:calibration_prefix], c_base[:calibration_prefix]
+
+
+def _calibrated_event_count_bounds(
+    n: int,
+    min_event_rate: float,
+    max_event_rate: float,
+) -> tuple[int, int]:
+    """Return tolerant event-count bounds for a calibrated dataset."""
+    min_count = max(0 if min_event_rate <= 0.0 else 1, int(min_event_rate * n) - 1)
+    max_count = min(n if max_event_rate >= 1.0 else n - 1, int(max_event_rate * n) + 1)
+
+    # A very small calibration set may have no count that represents the
+    # requested non-extreme rate interval. Do not reject every generated
+    # dataset when the discrete support is too coarse.
+    if min_count > max_count:
+        return 0, n
+    return min_count, max_count
+
+
 class BaselineHazard(ABC):
     """Abstract base class for baseline hazard distributions.
 
@@ -390,6 +429,7 @@ class ProportionalHazardSampler:
         target_event_rate: float | None = None,
         calibration_eps: float = 1e-12,
         beta_eff: float | None = None,
+        calibration_prefix: int | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Convert continuous regression target into event times.
 
@@ -417,6 +457,10 @@ class ProportionalHazardSampler:
             Epsilon for the calibration helper.
         beta_eff : float or None, default=None
             Effective beta to use; falls back to ``self.beta`` if None.
+        calibration_prefix : int or None, default=None
+            If set under ``target_event_rate``, calibrate the censoring
+            scale using only the first ``calibration_prefix`` rows
+            (context), then apply the resulting scale to all rows.
 
         Returns
         -------
@@ -452,19 +496,13 @@ class ProportionalHazardSampler:
                 )
             t_event_clean = _finite_positive_time(t_event_raw, self.max_time)
             c_base_clean = _finite_positive_time(c_base, self.max_time)
-            # Context-only calibration: fit on prefix rows, apply to all.
-            calib_prefix = getattr(self, "_calibration_prefix", None)
-            if calib_prefix is not None:
-                censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                    t_event_clean[:calib_prefix],
-                    c_base_clean[:calib_prefix],
-                    target_event_rate, eps=calibration_eps,
-                )
-            else:
-                censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                    t_event_clean, c_base_clean,
-                    target_event_rate, eps=calibration_eps,
-                )
+            calibration_t_event, calibration_c_base = _select_calibration_rows(
+                t_event_clean, c_base_clean, calibration_prefix,
+            )
+            censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                calibration_t_event, calibration_c_base,
+                target_event_rate, eps=calibration_eps,
+            )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
                 f"Unknown censoring_strategy '{censoring_strategy}'. "
@@ -684,6 +722,7 @@ class AcceleratedFailureTimeSampler:
         target_event_rate: float | None = None,
         calibration_eps: float = 1e-12,
         beta_eff: float | None = None,
+        calibration_prefix: int | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         if baseline_name == "mix":
             names = list(self.baseline_pool.keys())
@@ -711,19 +750,13 @@ class AcceleratedFailureTimeSampler:
                 )
             t_event_clean = _finite_positive_time(t_event_raw, self.max_time)
             c_base_clean = _finite_positive_time(c_base, self.max_time)
-            # Context-only calibration: fit on prefix rows, apply to all.
-            calib_prefix = getattr(self, "_calibration_prefix", None)
-            if calib_prefix is not None:
-                censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                    t_event_clean[:calib_prefix],
-                    c_base_clean[:calib_prefix],
-                    target_event_rate, eps=calibration_eps,
-                )
-            else:
-                censor_scale, _diag = calibrate_censor_scale_by_quantile(
-                    t_event_clean, c_base_clean,
-                    target_event_rate, eps=calibration_eps,
-                )
+            calibration_t_event, calibration_c_base = _select_calibration_rows(
+                t_event_clean, c_base_clean, calibration_prefix,
+            )
+            censor_scale, _diag = calibrate_censor_scale_by_quantile(
+                calibration_t_event, calibration_c_base,
+                target_event_rate, eps=calibration_eps,
+            )
         elif censoring_strategy != "uniform_scale":
             raise ValueError(
                 f"Unknown censoring_strategy '{censoring_strategy}'. "
@@ -843,6 +876,12 @@ class SurvivalSCMPrior(SCMPrior):
                 f"Invalid time_scale range for log_uniform: min_time_scale={min_time_scale}, "
                 f"max_time_scale={max_time_scale}. Must satisfy 0 < min_time_scale <= max_time_scale."
             )
+        if not 0.0 <= min_event_rate <= max_event_rate <= 1.0:
+            raise ValueError(
+                f"Invalid event-rate range: min_event_rate={min_event_rate}, "
+                f"max_event_rate={max_event_rate}. Must satisfy "
+                "0 <= min_event_rate <= max_event_rate <= 1."
+            )
         self.baseline_types = baseline_types or ["weibull", "gompertz", "loglogistic", "lognormal"]
         self.baseline_mode = baseline_mode
         self.max_time = max_time
@@ -866,6 +905,12 @@ class SurvivalSCMPrior(SCMPrior):
             raise ValueError(
                 f"Unknown calibration_scope '{calibration_scope}'. "
                 "Options: 'dataset', 'context'."
+            )
+        min_possible_seq_len = self.min_seq_len if self.min_seq_len is not None else self.max_seq_len
+        if calibration_scope == "context" and min_possible_seq_len < 2:
+            raise ValueError(
+                "calibration_scope='context' requires every dataset to have "
+                "at least two rows."
             )
         self.calibration_scope = calibration_scope
         if model_type not in ("ph", "aft", "mix"):
@@ -992,29 +1037,39 @@ class SurvivalSCMPrior(SCMPrior):
     @staticmethod
     def _survival_sanity_check(t: Tensor, delta: Tensor, min_time: float = MIN_RAW_TIME,
                                min_event_rate: float = 0.05, max_event_rate: float = 0.98,
-                               calibrating: bool = False, min_std: float = 1e-6) -> bool:
-        """Reject invalid times, degenerate time distributions, and event rates."""
+                               calibrating: bool = False, min_std: float = 1e-6,
+                               rate_prefix: int | None = None) -> bool:
+        """Reject invalid times, degenerate time distributions, and event rates.
+
+        Parameters
+        ----------
+        rate_prefix : int, optional
+            If set, event-rate bounds are validated on ``delta[:rate_prefix]``
+            only (context rows), while time finiteness and non-degeneracy
+            are checked on the full dataset.
+        """
         if not torch.isfinite(t).all():
             return False
         if (t < min_time).any():
             return False
         if t.std() < min_std:
             return False
-        event_rate = delta.float().mean().item()
+        if rate_prefix is not None:
+            delta_rate = delta[:rate_prefix]
+        else:
+            delta_rate = delta
+        if delta_rate.numel() == 0:
+            return False
         if calibrating:
-            # Under target_event_rate strategy, the calibration chooses the
-            # scale to hit the requested rate.  Use count-based bounds with
-            # ±1 tolerance for discrete small datasets.  Allow full-range
-            # when min/max_event_rate are at their extremes.
-            n = delta.numel()
-            min_count = max(0 if min_event_rate <= 0.0 else 1,
-                            int(min_event_rate * n) - 1)
-            max_count = min(n if max_event_rate >= 1.0 else n - 1,
-                            int(max_event_rate * n) + 1)
-            event_count = int(delta.sum().item())
+            n = delta_rate.numel()
+            min_count, max_count = _calibrated_event_count_bounds(
+                n, min_event_rate, max_event_rate,
+            )
+            event_count = int(delta_rate.sum().item())
             if event_count < min_count or event_count > max_count:
                 return False
         else:
+            event_rate = delta_rate.float().mean().item()
             if event_rate < min_event_rate or event_rate > max_event_rate:
                 return False
         return True
@@ -1050,14 +1105,10 @@ class SurvivalSCMPrior(SCMPrior):
                 else:
                     sampler = self.aft_sampler
 
-                # Context-only calibration: fit censoring scale on the
-                # first seq_len//2 rows (context), apply to all rows.
-                if self.calibration_scope == "context":
-                    sample_seq_len = y_flat.shape[0]
-                    calib_prefix = sample_seq_len // 2
-                    sampler._calibration_prefix = calib_prefix
-                else:
-                    sampler._calibration_prefix = None
+                calib_prefix = (
+                    y_flat.shape[0] // 2
+                    if self.calibration_scope == "context" else None
+                )
 
                 t, delta, t_event = sampler.sample(
                     y=y_flat,
@@ -1069,6 +1120,7 @@ class SurvivalSCMPrior(SCMPrior):
                     censoring_strategy=self.censoring_strategy,
                     target_event_rate=params.get("target_event_rate"),
                     beta_eff=beta_eff,
+                    calibration_prefix=calib_prefix,
                 )
 
                 # Apply time scale multiplier
@@ -1084,6 +1136,12 @@ class SurvivalSCMPrior(SCMPrior):
                     min_event_rate=params["min_event_rate"],
                     max_event_rate=params["max_event_rate"],
                     calibrating=(self.censoring_strategy == "target_event_rate"),
+                    rate_prefix=(
+                        calib_prefix
+                        if self.calibration_scope == "context"
+                        and self.censoring_strategy == "target_event_rate"
+                        else None
+                    ),
                 ):
                     return X_out, t, delta, t_event, d_out
 

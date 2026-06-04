@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+import pytest
 import torch
 
 from tabicl.prior._survival import (
@@ -84,14 +86,67 @@ def test_survival_sanity_retains_independent_variance_guard():
     assert not SurvivalSCMPrior._survival_sanity_check(t, delta)
 
 
+@pytest.mark.parametrize("context_event", [0.0, 1.0])
+def test_calibrating_sanity_accepts_one_row_context(context_event):
+    t = torch.tensor([1.0, 2.0])
+    delta = torch.tensor([context_event, 1.0 - context_event])
+    assert SurvivalSCMPrior._survival_sanity_check(
+        t, delta,
+        min_event_rate=0.4,
+        max_event_rate=0.9,
+        calibrating=True,
+        rate_prefix=1,
+    )
+
+
+@pytest.mark.parametrize("event_value", [0.0, 1.0])
+def test_calibrating_sanity_rejects_extreme_rate_when_representable(event_value):
+    t = torch.arange(1.0, 5.0)
+    delta = torch.full((4,), event_value)
+    assert not SurvivalSCMPrior._survival_sanity_check(
+        t, delta,
+        min_event_rate=0.4,
+        max_event_rate=0.9,
+        calibrating=True,
+    )
+
+
+def test_survival_sanity_rejects_empty_rate_subset():
+    t = torch.tensor([1.0, 2.0])
+    delta = torch.tensor([0.0, 1.0])
+    assert not SurvivalSCMPrior._survival_sanity_check(
+        t, delta,
+        calibrating=True,
+        rate_prefix=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("min_event_rate", "max_event_rate"),
+    [(-0.1, 0.9), (0.9, 0.4), (0.4, 1.1)],
+)
+def test_survival_prior_rejects_invalid_event_rate_range(min_event_rate, max_event_rate):
+    with pytest.raises(ValueError, match="Invalid event-rate range"):
+        SurvivalSCMPrior(
+            min_event_rate=min_event_rate,
+            max_event_rate=max_event_rate,
+        )
+
+
+def test_context_calibration_rejects_datasets_without_context_rows():
+    with pytest.raises(ValueError, match="at least two rows"):
+        SurvivalSCMPrior(
+            min_seq_len=1,
+            max_seq_len=8,
+            calibration_scope="context",
+        )
+
+
 def test_context_calibration_invariant_to_query_rows():
     """Changing query rows must not change censoring scale."""
-    import numpy as np
-
     # PH sampler
     baseline_ph = {"weibull": WeibullHazard()}
     sampler_ph = ProportionalHazardSampler(baseline_ph, beta=1.0, max_time=1e30, u_eps=1e-6)
-    sampler_ph._calibration_prefix = 5
 
     y = torch.randn(10)
     rng = np.random.default_rng(42)
@@ -107,13 +162,13 @@ def test_context_calibration_invariant_to_query_rows():
     t1, d1, te1 = sampler_ph.sample(
         y1, "weibull", params, rng, device="cpu",
         censoring_strategy="target_event_rate",
-        target_event_rate=0.5,
+        target_event_rate=0.5, calibration_prefix=5,
     )
     torch.manual_seed(42)
     t2, d2, te2 = sampler_ph.sample(
         y2, "weibull", params, rng, device="cpu",
         censoring_strategy="target_event_rate",
-        target_event_rate=0.5,
+        target_event_rate=0.5, calibration_prefix=5,
     )
 
     # Context rows (first 5) must have identical t_obs and delta
@@ -125,33 +180,52 @@ def test_context_calibration_invariant_to_query_rows():
     sampler_aft = AcceleratedFailureTimeSampler(
         baseline_aft, beta=1.0, max_time=1e30, u_eps=1e-6,
     )
-    sampler_aft._calibration_prefix = 5
 
     torch.manual_seed(43)
     t3, d3, te3 = sampler_aft.sample(
         y1, "weibull", params, rng, device="cpu",
         censoring_strategy="target_event_rate",
-        target_event_rate=0.5,
+        target_event_rate=0.5, calibration_prefix=5,
     )
     torch.manual_seed(43)
     t4, d4, te4 = sampler_aft.sample(
         y2, "weibull", params, rng, device="cpu",
         censoring_strategy="target_event_rate",
-        target_event_rate=0.5,
+        target_event_rate=0.5, calibration_prefix=5,
     )
     assert torch.allclose(t3[:5], t4[:5])
     assert torch.equal(d3[:5], d4[:5])
 
 
-if __name__ == "__main__":
-    test_exact_k_events_achieved()
-    test_below_smallest_yields_zero()
-    test_above_largest_yields_all()
-    test_ties_correct_handling()
-    test_monotonic()
-    test_scale_clamped_to_eps()
-    test_survival_sanity_accepts_sanitized_time_floor()
-    test_survival_sanity_rejects_time_below_sanitized_floor()
-    test_survival_sanity_retains_independent_variance_guard()
-    test_context_calibration_invariant_to_query_rows()
-    print("All 10 tests passed.")
+@pytest.mark.parametrize(
+    "sampler",
+    [
+        ProportionalHazardSampler({"weibull": WeibullHazard()}),
+        AcceleratedFailureTimeSampler({"weibull": WeibullAFT()}),
+    ],
+)
+@pytest.mark.parametrize("prefix", [0, -1, 5, 1.5, True])
+def test_sampler_rejects_invalid_calibration_prefix(sampler, prefix):
+    with pytest.raises(ValueError, match="calibration_prefix must be an integer"):
+        sampler.sample(
+            torch.randn(4),
+            "weibull",
+            {"k": 1.0},
+            np.random.default_rng(42),
+            censoring_strategy="target_event_rate",
+            target_event_rate=0.5,
+            calibration_prefix=prefix,
+        )
+
+
+def test_sampler_accepts_numpy_integer_calibration_prefix():
+    sampler = ProportionalHazardSampler({"weibull": WeibullHazard()})
+    sampler.sample(
+        torch.randn(4),
+        "weibull",
+        {"k": 1.0},
+        np.random.default_rng(42),
+        censoring_strategy="target_event_rate",
+        target_event_rate=0.5,
+        calibration_prefix=np.int64(2),
+    )
