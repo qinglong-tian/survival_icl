@@ -963,14 +963,15 @@ class SurvivalSCMPrior(SCMPrior):
         return True
 
     @staticmethod
-    def _survival_sanity_check(t: Tensor, delta: Tensor, min_time: float = 1e-6,
+    def _survival_sanity_check(t: Tensor, delta: Tensor, min_time: float = MIN_RAW_TIME,
                                min_event_rate: float = 0.05, max_event_rate: float = 0.98,
-                               calibrating: bool = False) -> bool:
+                               calibrating: bool = False, min_std: float = 1e-6) -> bool:
+        """Reject invalid times, degenerate time distributions, and event rates."""
         if not torch.isfinite(t).all():
             return False
-        if (t <= min_time).any():
+        if (t < min_time).any():
             return False
-        if t.std() < min_time:
+        if t.std() < min_std:
             return False
         event_rate = delta.float().mean().item()
         if calibrating:

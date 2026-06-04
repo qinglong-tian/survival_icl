@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from tabicl.prior._survival import calibrate_censor_scale_by_quantile
+from tabicl.prior._survival import (
+    MIN_RAW_TIME,
+    SurvivalSCMPrior,
+    calibrate_censor_scale_by_quantile,
+)
 
 
 def test_exact_k_events_achieved():
@@ -33,7 +37,7 @@ def test_ties_correct_handling():
     t_event = torch.tensor([2.0, 2.0, 2.0, 4.0, 4.0])
     c_base = torch.ones_like(t_event)
     scale, diag = calibrate_censor_scale_by_quantile(t_event, c_base, 0.3)
-    # ratioss: [2,2,2,4,4], s < 2 → 0, 2 < s < 4 → 3/5=0.6, s > 4 → 1.0
+    # ratios: [2,2,2,4,4], s < 2 → 0, 2 < s < 4 → 3/5=0.6, s > 4 → 1.0
     # target 0.3, closest achievable is 0 with error 0.3
     assert diag["achieved"] == 0.0
 
@@ -58,6 +62,24 @@ def test_scale_clamped_to_eps():
     assert scale >= 1e-12
 
 
+def test_survival_sanity_accepts_sanitized_time_floor():
+    t = torch.tensor([MIN_RAW_TIME, 0.1, 1.0, 10.0])
+    delta = torch.tensor([0.0, 1.0, 0.0, 1.0])
+    assert SurvivalSCMPrior._survival_sanity_check(t, delta)
+
+
+def test_survival_sanity_rejects_time_below_sanitized_floor():
+    t = torch.tensor([0.0, 0.1, 1.0, 10.0])
+    delta = torch.tensor([0.0, 1.0, 0.0, 1.0])
+    assert not SurvivalSCMPrior._survival_sanity_check(t, delta)
+
+
+def test_survival_sanity_retains_independent_variance_guard():
+    t = torch.full((4,), MIN_RAW_TIME)
+    delta = torch.tensor([0.0, 1.0, 0.0, 1.0])
+    assert not SurvivalSCMPrior._survival_sanity_check(t, delta)
+
+
 if __name__ == "__main__":
     test_exact_k_events_achieved()
     test_below_smallest_yields_zero()
@@ -65,4 +87,7 @@ if __name__ == "__main__":
     test_ties_correct_handling()
     test_monotonic()
     test_scale_clamped_to_eps()
-    print("All 6 tests passed.")
+    test_survival_sanity_accepts_sanitized_time_floor()
+    test_survival_sanity_rejects_time_below_sanitized_floor()
+    test_survival_sanity_retains_independent_variance_guard()
+    print("All 9 tests passed.")

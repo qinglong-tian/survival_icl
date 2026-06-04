@@ -587,6 +587,37 @@ def test_trainer_nll_import():
     assert callable(discrete_survival_nll)
 
 
+def test_masked_survival_nll_uses_only_valid_queries():
+    """Padding positions do not contribute to the survival loss."""
+    from tabicl.survival import discrete_survival_nll
+    from tabicl.train._run import _masked_discrete_survival_nll
+
+    h_raw = torch.tensor([[0.1, -0.2], [5.0, -5.0], [-0.3, 0.4]])
+    bin_idx = torch.tensor([0, 1, 1])
+    delta = torch.tensor([1.0, 0.0, 0.0])
+    valid_mask = torch.tensor([True, False, True])
+
+    actual = _masked_discrete_survival_nll(h_raw, bin_idx, delta, valid_mask)
+    expected = discrete_survival_nll(
+        h_raw[valid_mask], bin_idx[valid_mask], delta[valid_mask],
+    )
+
+    assert torch.allclose(actual, expected)
+
+
+def test_masked_survival_nll_rejects_all_padding():
+    """Malformed micro-batches cannot silently produce a zero-loss update."""
+    from tabicl.train._run import _masked_discrete_survival_nll
+
+    with pytest.raises(ValueError, match="no valid query observations"):
+        _masked_discrete_survival_nll(
+            torch.zeros(2, 3),
+            torch.zeros(2, dtype=torch.long),
+            torch.zeros(2),
+            torch.zeros(2, dtype=torch.bool),
+        )
+
+
 # ---------------------------------------------------------------------------
 # New validation tests
 # ---------------------------------------------------------------------------
@@ -763,6 +794,24 @@ def test_make_model_config_uses_loaded_model_bin_count():
 
     assert model.num_quantiles == 8
     assert config["num_quantiles"] == 8
+
+
+def test_make_model_config_uses_current_defaults_for_legacy_model():
+    """Missing legacy attributes fall back to current TabICL defaults."""
+    model = TabICL(
+        max_classes=0, num_quantiles=10, embed_dim=32,
+        col_num_blocks=1, col_nhead=2, col_num_inds=8,
+        row_num_blocks=1, row_nhead=2, row_num_cls=2,
+        icl_num_blocks=1, icl_nhead=2, ff_factor=2,
+    )
+    del model.row_rope_interleaved
+    del model.bias_free_ln
+
+    trainer = _make_minimal_trainer(_make_tiny_config())
+    config = trainer._make_model_config(model)
+
+    assert config["row_rope_interleaved"] is False
+    assert config["bias_free_ln"] is False
 
 
 def test_compiled_regression_pretrained_converts_to_survival():

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import functools
+import inspect
+import math
 import os
 import timeit
 import warnings
-import functools
 from contextlib import nullcontext
 
-import math
 import numpy as np
 
 import torch
@@ -60,6 +61,19 @@ def _parse_baseline_types(config):
     if isinstance(raw, str):
         return [b.strip() for b in raw.split(",") if b.strip()]
     return raw
+
+
+def _masked_discrete_survival_nll(h_raw, bin_idx, delta, valid_mask):
+    """Compute survival NLL over valid query observations."""
+    from tabicl.survival import discrete_survival_nll
+
+    if not valid_mask.any():
+        raise ValueError("Survival micro-batch contains no valid query observations.")
+    if not valid_mask.all():
+        h_raw = h_raw[valid_mask]
+        bin_idx = bin_idx[valid_mask]
+        delta = delta[valid_mask]
+    return discrete_survival_nll(h_raw.float(), bin_idx, delta.float())
 
 
 def ddp_cleanup(func):
@@ -213,39 +227,20 @@ class Trainer:
         """Derive TabICL constructor kwargs from a loaded regressor model.
 
         The regressor's TabICL instance stores its full constructor arguments
-        as attributes — read them directly to preserve non-default options
-        (col_feature_group, col_target_aware, SSMax, rope, etc.).
-        Only survival task fields are changed.
+        as attributes. Read them directly to preserve non-default options,
+        falling back to current constructor defaults for legacy models that
+        predate an argument. Only survival task fields are changed.
         """
-        # Direct read from model attributes (TabICL stores every constructor arg)
+        task_overrides = {"max_classes": 0, "survival": True}
         config = {
-            "max_classes": 0,
-            "num_quantiles": model.num_quantiles,
-            "survival": True,
-            "embed_dim": model.embed_dim,
-            "col_num_blocks": model.col_num_blocks,
-            "col_nhead": model.col_nhead,
-            "col_num_inds": model.col_num_inds,
-            "col_affine": model.col_affine,
-            "col_feature_group": model.col_feature_group,
-            "col_feature_group_size": model.col_feature_group_size,
-            "col_target_aware": model.col_target_aware,
-            "col_ssmax": model.col_ssmax,
-            "row_num_blocks": model.row_num_blocks,
-            "row_nhead": model.row_nhead,
-            "row_num_cls": model.row_num_cls,
-            "row_rope_base": model.row_rope_base,
-            "row_rope_interleaved": model.row_rope_interleaved,
-            "icl_num_blocks": model.icl_num_blocks,
-            "icl_nhead": model.icl_nhead,
-            "icl_ssmax": model.icl_ssmax,
-            "ff_factor": model.ff_factor,
-            "dropout": model.dropout,
-            "activation": model.activation,
-            "norm_first": model.norm_first,
-            "bias_free_ln": model.bias_free_ln,
-            "recompute": getattr(model.row_interactor, "recompute", False),
+            name: getattr(model, name, parameter.default)
+            for name, parameter in inspect.signature(TabICL).parameters.items()
+            if name not in task_overrides
+            and name != "recompute"
+            and parameter.default is not inspect.Parameter.empty
         }
+        config.update(task_overrides)
+        config["recompute"] = getattr(getattr(model, "row_interactor", None), "recompute", False)
         return config
 
     def build_model(self):
@@ -1128,7 +1123,7 @@ class Trainer:
             self.model.require_backward_grad_sync = micro_batch_idx == num_micro_batches - 1
 
         with self.amp_ctx:
-            h_raw = self.model(micro_X, t_train, None, delta_train=delta_train)
+            h_raw = self.model(micro_X, t_train, d=None, delta_train=delta_train)
             # h_raw: (B, T_test, K) — flatten for loss
             B, T_test, K = h_raw.shape
             h_raw_flat = h_raw.reshape(-1, K)
@@ -1142,18 +1137,9 @@ class Trainer:
 
             # Compute NLL in float32 under AMP for numerical stability
             bin_idx = self.binner.bin_index(t_test_flat)  # (B * T_test,) long
-            from tabicl.survival import discrete_survival_nll
-
-            if valid_mask_flat.all():
-                loss = discrete_survival_nll(
-                    h_raw_flat.float(), bin_idx, delta_test_flat.float(),
-                )
-            else:
-                loss = discrete_survival_nll(
-                    h_raw_flat[valid_mask_flat].float(),
-                    bin_idx[valid_mask_flat],
-                    delta_test_flat[valid_mask_flat].float(),
-                )
+            loss = _masked_discrete_survival_nll(
+                h_raw_flat, bin_idx, delta_test_flat, valid_mask_flat,
+            )
             # Keep loss in float32 — GradScaler handles mixed-precision loss
             # connected to float16 model outputs.  Casting back to float16 can
             # overflow (e.g. 100000 → inf in float16).
