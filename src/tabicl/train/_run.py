@@ -22,6 +22,11 @@ from torch.distributed import init_process_group, destroy_process_group
 from tqdm import tqdm
 
 try:
+    from torch.cuda import OutOfMemoryError as _OOMError
+except ImportError:
+    _OOMError = RuntimeError
+
+try:
     import wandb
 except ImportError:
     wandb = None
@@ -192,8 +197,9 @@ class Trainer:
         seed_offset = self.ddp_rank if self.ddp else 0
         np.random.seed(self.config.np_seed + seed_offset)
         torch.manual_seed(self.config.torch_seed + seed_offset)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
     def configure_wandb(self):
         """Set up Weights & Biases logging."""
@@ -673,8 +679,12 @@ class Trainer:
 
     def configure_amp(self):
         """Configure automatic mixed precision (AMP) for training."""
-        self.amp = self.config.amp and "cuda" in self.config.device
-        self.scaler = torch.GradScaler("cuda", enabled=self.amp)
+        _cuda_available = torch.cuda.is_available()
+        self.amp = self.config.amp and "cuda" in self.config.device and _cuda_available
+        if _cuda_available:
+            self.scaler = torch.GradScaler("cuda", enabled=self.amp)
+        else:
+            self.scaler = torch.GradScaler(enabled=False)
         if self.amp:
             if self.master_process:
                 print(f"Automatic Mixed Precision is enabled.")
@@ -944,7 +954,8 @@ class Trainer:
                     results = self.run_batch(batch)
                 train_time = train_timer.elapsed
 
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 self.curr_step = step + 1
                 if self.master_process:
@@ -1187,10 +1198,11 @@ class Trainer:
                 micro_results = self.run_micro_batch(mb, idx, num_micro_batches)
                 for k, v in micro_results.items():
                     results[k] += v
-            except torch.cuda.OutOfMemoryError:
+            except _OOMError:
                 print(f"Warning: OOM error in micro-batch {idx+1}/{num_micro_batches} "
                       f"at step {self.curr_step}. Skipping.")
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 failed_batches += 1
                 continue
 
