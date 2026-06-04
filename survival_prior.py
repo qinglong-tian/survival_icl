@@ -420,6 +420,7 @@ class SaveSurvivalPriorDataset:
             "min_event_rate": self.args.min_event_rate,
             "max_event_rate": self.args.max_event_rate,
             "censoring_strategy": self.args.censoring_strategy,
+            "calibration_scope": getattr(self.args, "censor_calibration_scope", "dataset"),
         }
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
@@ -500,6 +501,10 @@ class LoadSurvivalPriorDataset(IterableDataset):
 
     device : str, default="cpu"
         Device to load tensors to.
+
+    censor_calibration_scope : str, default="dataset"
+        Expected calibration scope.  Rejects on-disk data whose metadata
+        is missing or incompatible when ``"context"`` is requested.
     """
 
     def __init__(
@@ -512,6 +517,7 @@ class LoadSurvivalPriorDataset(IterableDataset):
         max_batches=None,
         timeout=60,
         delete_after_load=False,
+        censor_calibration_scope="dataset",
         device="cpu",
     ):
         super().__init__()
@@ -525,6 +531,7 @@ class LoadSurvivalPriorDataset(IterableDataset):
         self.timeout = timeout
         self.delete_after_load = delete_after_load
         self.device = device
+        self.censor_calibration_scope = censor_calibration_scope
 
         self.metadata = None
         metadata_file = self.data_dir / "metadata.json"
@@ -534,6 +541,22 @@ class LoadSurvivalPriorDataset(IterableDataset):
                     self.metadata = json.load(f)
             except Exception as e:
                 print(f"Warning: Could not load or parse metadata.json: {e}")
+
+        # Reject disk-based priors when context calibration is required
+        # but the on-disk metadata is missing or incompatible.
+        if censor_calibration_scope == "context":
+            if self.metadata is None:
+                raise RuntimeError(
+                    "censor_calibration_scope='context' requires metadata.json "
+                    f"in the prior directory ({self.data_dir}), but none was found."
+                )
+            saved_scope = self.metadata.get("calibration_scope", "dataset")
+            if saved_scope != "context":
+                raise RuntimeError(
+                    f"Disk prior was generated with calibration_scope='{saved_scope}', "
+                    f"but censor_calibration_scope='context' was requested. "
+                    f"Regenerate the data with --censor_calibration_scope context."
+                )
 
         self.buffer_X = None
         self.buffer_t = None
@@ -861,6 +884,11 @@ if __name__ == "__main__":
         default="target_event_rate",
         choices=["target_event_rate", "uniform_scale"],
         help="Censoring strategy: target_event_rate calibrates scale per dataset, uniform_scale samples censor_scale from U[min,max]",
+    )
+    parser.add_argument(
+        "--censor_calibration_scope", type=str, default="dataset",
+        choices=["dataset", "context"],
+        help="'dataset' calibrates on full dataset, 'context' calibrates on context rows only"
     )
     parser.add_argument(
         "--device", type=str, default="cpu", choices=["cpu", "cuda"], help="Device for generation"

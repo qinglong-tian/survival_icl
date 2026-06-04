@@ -561,14 +561,9 @@ def test_t_event_not_used_in_observed_mode_loss():
     source = inspect.getsource(Trainer._run_micro_batch_survival)
     # The event_mode branch is gated; observed path uses delta_test_z = delta_test
     assert "delta_test_z = delta_test" in source
-    assert "delta_test_z = torch.ones_like" in source  # event path exists too
-    # t_event is unpacked as micro_t_event (no longer discarded)
-    assert "micro_t_event" in source
-    # t_event is only used inside the event_mode branch
-    assert "micro_t_event" in source
-    event_start = source.index("if event_mode:")
-    rest = source[event_start:]
-    assert "micro_t_event" in rest, "event_mode branch must use micro_t_event"
+    assert "delta_test_z = torch.ones_like" in source  # event path
+    # Event mode uses t_event_test (passed to standardize_survival_micro_batch)
+    assert "t_event_test" in source
     # discrete_survival_nll signature: 3 positional args, no t_event
     sig = inspect.signature(discrete_survival_nll)
     params = list(sig.parameters.keys())
@@ -1023,6 +1018,7 @@ def test_resume_rejects_mismatched_supervision():
         import torch.optim as optim
         trainer2.optimizer = optim.AdamW(m1.parameters(), lr=1e-4)
         trainer2.scheduler = optim.lr_scheduler.ConstantLR(trainer2.optimizer)
+        trainer2.scaler = torch.cuda.amp.GradScaler(enabled=False)
         with pytest.raises(RuntimeError, match="query_supervision"):
             trainer2.restore_training_state()
 

@@ -250,8 +250,15 @@ def standardize_survival_micro_batch(
         t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
         delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
         if t_event_test is not None and t_event_test_z is not None and t_event_in_range is not None:
-            q_event_z, q_in_range = scaler.transform_event_target(t_event_test[ds_idx])
-            t_event_test_z[ds_idx] = torch.where(query_mask, q_event_z, torch.zeros_like(q_event_z))
-            t_event_in_range[ds_idx] = torch.where(query_mask, q_in_range, torch.zeros_like(q_in_range))
+            # Mask padding positions (zero-valued) before validation in
+            # transform_event_target.  Padding keeps zero/in-range=False.
+            t_ev_ds = t_event_test[ds_idx]
+            q_event_z = torch.zeros_like(t_ev_ds)
+            q_in_range = torch.zeros_like(t_ev_ds, dtype=torch.bool)
+            if query_mask.any():
+                q_event_z[query_mask], q_in_range[query_mask] = \
+                    scaler.transform_event_target(t_ev_ds[query_mask])
+            t_event_test_z[ds_idx] = q_event_z
+            t_event_in_range[ds_idx] = q_in_range
 
     return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z, t_event_in_range

@@ -636,6 +636,7 @@ class Trainer:
                     ddp_rank=getattr(self, "ddp_rank", 0),
                     start_from=self.config.load_prior_start,
                     delete_after_load=self.config.delete_after_load,
+                    censor_calibration_scope=getattr(self.config, "censor_calibration_scope", "dataset"),
                     device=self.config.prior_device,
                 )
         else:
@@ -928,6 +929,7 @@ class Trainer:
                 ("query_supervision", "query_supervision", "observed"),
                 ("censor_calibration_scope", "censor_calibration_scope", "dataset"),
                 ("query_pinball_weight", "query_pinball_weight", 0.0),
+                ("query_pinball_quantiles", "query_pinball_quantiles", [0.1, 0.25, 0.5, 0.75, 0.9]),
             ]:
                 saved = meta.get(key, default)
                 cli = getattr(self, attr, None)
@@ -1237,6 +1239,7 @@ class Trainer:
             valid_mask = position_idx < query_sizes_ds.unsqueeze(1)  # (B, T_test)
             valid_mask_flat = valid_mask.reshape(-1)  # (B * T_test,)
 
+            pinball = None
             if event_mode:
                 # Event NLL: bin index from unclipped t_event_z,
                 # delta = 1 for all valid query rows.
@@ -1247,10 +1250,10 @@ class Trainer:
                 )
                 loss = surv_nll
 
-                # Optional pinball on oracle event targets
+                # Always compute in_range for logging; pinball is optional
+                t_event_in_range_flat = t_event_in_range.reshape(-1)
                 if self.query_pinball_weight > 0.0:
                     from tabicl.survival import oracle_query_pinball_loss
-                    t_event_in_range_flat = t_event_in_range.reshape(-1)
                     pinball = oracle_query_pinball_loss(
                         h_raw_flat, t_test_flat, self.binner,
                         in_range=t_event_in_range_flat,
@@ -1277,7 +1280,6 @@ class Trainer:
                     h_raw_flat, bin_idx, delta_test_flat, valid_mask_flat,
                 )
                 surv_nll = loss
-                pinball = None
 
             # Keep loss in float32 — GradScaler handles mixed-precision loss
 
