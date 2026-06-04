@@ -113,13 +113,19 @@ class ICLearning(nn.Module):
             self.ln = nn.LayerNorm(d_model, bias=not bias_free_ln)
 
         if survival:
+            self.max_classes = 0  # classification branch doesn't support survival decoder
             self.y_encoder = nn.Linear(2, d_model)
         elif max_classes > 0:  # Classification
             self.y_encoder = OneHotAndLinear(max_classes, d_model)
         else:  # Regression
             self.y_encoder = nn.Linear(1, d_model)
 
-        self.decoder = nn.Sequential(nn.Linear(d_model, d_model * 2), nn.GELU(), nn.Linear(d_model * 2, out_dim))
+        if survival:
+            from tabicl.survival._head import DiscreteTimeSurvivalHead
+
+            self.decoder = DiscreteTimeSurvivalHead(d_model=d_model, num_bins=out_dim)
+        else:
+            self.decoder = nn.Sequential(nn.Linear(d_model, d_model * 2), nn.GELU(), nn.Linear(d_model * 2, out_dim))
         self.inference_mgr = InferenceManager(enc_name="tf_icl", out_dim=out_dim)
 
     def _grouping(self, num_classes: int) -> tuple[Tensor, int]:
@@ -300,6 +306,7 @@ class ICLearning(nn.Module):
         return_logits: bool = False,
         softmax_temperature: float = 0.9,
         auto_batch: bool = True,
+        delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """Generate predictions for standard classification with up to `max_classes` classes.
 
@@ -324,6 +331,12 @@ class ICLearning(nn.Module):
         auto_batch : bool, default=True
             Whether to use InferenceManager to automatically split inputs into smaller batches.
 
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Passed as a tensor input to ``InferenceManager`` so it is sliced
+            consistently with ``R`` and ``y_train`` during auto-batching.
+            Ignored for non-survival tasks.
+
         Returns
         -------
         Tensor
@@ -335,8 +348,14 @@ class ICLearning(nn.Module):
                 If return_logits=False: Probabilities of shape (B, test_size, num_classes)
         """
 
+        # For survival during inference: pass delta_train as a tensor input
+        # to InferenceManager so it gets sliced consistently with R and y_train
+        # during CUDA auto-batching.  _icl_predictions receives it as a keyword.
+        inputs = OrderedDict([("R", R), ("y_train", y_train)])
+        if self.survival and delta_train is not None:
+            inputs["delta_train"] = delta_train
         out = self.inference_mgr(
-            self._icl_predictions, inputs=OrderedDict([("R", R), ("y_train", y_train)]), auto_batch=auto_batch
+            self._icl_predictions, inputs=inputs, auto_batch=auto_batch,
         )
 
         train_size = y_train.shape[1]
@@ -432,6 +451,7 @@ class ICLearning(nn.Module):
         return_logits: bool = True,
         softmax_temperature: float = 0.9,
         mgr_config: MgrConfig = None,
+        delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """In-context learning based on learned row representations for inference.
 
@@ -472,7 +492,7 @@ class ICLearning(nn.Module):
         self.inference_mgr.configure(**mgr_config)
 
         if self.max_classes == 0:  # Regression
-            out = self._predict_standard(R, y_train)
+            out = self._predict_standard(R, y_train, delta_train=delta_train)
         else:  # Classification
             num_classes = len(torch.unique(y_train[0]))
             assert all(
@@ -562,11 +582,14 @@ class ICLearning(nn.Module):
             out = self._icl_predictions(R, y_train, delta_train=delta_train)
             out = out[:, train_size:]
         else:
-            out = self._inference_forward(R, y_train, return_logits, softmax_temperature, mgr_config)
+            out = self._inference_forward(
+                R, y_train, return_logits, softmax_temperature, mgr_config,
+                delta_train=delta_train,
+            )
 
         return out
 
-    def prepare_repr_cache(self, R: Tensor, y_train: Tensor) -> Tensor:
+    def prepare_repr_cache(self, R: Tensor, y_train: Tensor, delta_train: Optional[Tensor] = None) -> Tensor:
         """Add target embedding to train representations.
 
         Parameters
@@ -581,6 +604,10 @@ class ICLearning(nn.Module):
             Training targets of shape (B, train_size), where train_size is the position
             to split the input into training and test data.
 
+        delta_train : Optional[Tensor], default=None
+            Event indicator for survival mode, shape ``(B, train_size)``.
+            Required when ``self.survival=True``; ignored otherwise.
+
         Returns
         -------
         Tensor
@@ -589,7 +616,11 @@ class ICLearning(nn.Module):
         """
 
         train_size = y_train.shape[1]
-        if self.max_classes > 0:
+        if self.survival:
+            assert delta_train is not None, "delta_train must be provided when survival=True"
+            y_feat = torch.stack([y_train, delta_train.float()], dim=-1)  # (B, train_size, 2)
+            Ry_train = self.y_encoder(y_feat)
+        elif self.max_classes > 0:
             Ry_train = self.y_encoder(y_train.float())
         else:
             Ry_train = self.y_encoder(y_train.unsqueeze(-1))
@@ -697,6 +728,7 @@ class ICLearning(nn.Module):
         y_train: Optional[Tensor] = None,
         use_cache: bool = False,
         store_cache: bool = True,
+        delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """In-context learning predictions with KV caching.
 
@@ -732,7 +764,11 @@ class ICLearning(nn.Module):
             assert y_train is not None, "y_train must be provided when store_cache=True"
             train_size = y_train.shape[1]
 
-            if self.max_classes > 0:  # Classification
+            if self.survival:
+                assert delta_train is not None, "delta_train must be provided when store_cache=True and survival=True"
+                y_feat = torch.stack([y_train, delta_train.float()], dim=-1)
+                Ry_train = self.y_encoder(y_feat)
+            elif self.max_classes > 0:  # Classification
                 Ry_train = self.y_encoder(y_train.float())
             else:  # Regression
                 Ry_train = self.y_encoder(y_train.unsqueeze(-1))
@@ -756,6 +792,7 @@ class ICLearning(nn.Module):
         R: Tensor,
         icl_cache: KVCache,
         y_train: Optional[Tensor] = None,
+        delta_train: Optional[Tensor] = None,
         num_classes: Optional[int] = None,
         return_logits: bool = True,
         softmax_temperature: float = 0.9,
@@ -838,6 +875,7 @@ class ICLearning(nn.Module):
                     ("y_train", y_train),
                     ("use_cache", use_cache),
                     ("store_cache", store_cache),
+                    ("delta_train", delta_train),
                 ]
             ),
         )

@@ -229,6 +229,7 @@ class TabICLCache:
     icl_cache: Optional[KVCache] = None
     train_shape: Tuple[int, int, int] = (0, 0, 0)
     num_classes: Optional[int] = None
+    survival: bool = False
 
     def __post_init__(self):
         """Initialize sub-caches if not provided."""
@@ -302,6 +303,7 @@ class TabICLCache:
             icl_cache=self.icl_cache[indices] if self.icl_cache else KVCache(),
             train_shape=(end - start, self.train_shape[1], self.train_shape[2]),
             num_classes=self.num_classes,
+            survival=self.survival,
         )
 
     def to(self, device, dtype=None) -> TabICLCache:
@@ -326,6 +328,7 @@ class TabICLCache:
             icl_cache=self.icl_cache.to(device, dtype=dtype) if self.icl_cache else KVCache(),
             train_shape=self.train_shape,
             num_classes=self.num_classes,
+            survival=self.survival,
         )
 
     @staticmethod
@@ -349,6 +352,14 @@ class TabICLCache:
         row_reprs = [c.row_repr for c in caches if c.row_repr is not None]
         icl_caches = [c.icl_cache for c in caches if c.icl_cache is not None]
 
+        # Reject mixed-task concatenation — survival status must be consistent.
+        all_survival = {c.survival for c in caches}
+        if len(all_survival) > 1:
+            raise ValueError(
+                "Cannot concatenate caches with mixed survival status: "
+                f"{all_survival}. All caches must have the same survival flag."
+            )
+
         total_batch = sum(c.train_shape[0] for c in caches)
         train_size = caches[0].train_shape[1]
         n_features = caches[0].train_shape[2]
@@ -359,4 +370,5 @@ class TabICLCache:
             icl_cache=KVCache.concat(icl_caches, dim=dim) if icl_caches else KVCache(),
             train_shape=(total_batch, train_size, n_features),
             num_classes=caches[0].num_classes,
+            survival=next(iter(all_survival)),
         )

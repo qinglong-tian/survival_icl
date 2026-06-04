@@ -198,7 +198,6 @@ read -r -d '' TRAIN_FLAGS <<'EOF' || true
 --warmup_proportion 0.02
 --gradient_clipping 1.0
 --num_bins 50
---alpha_start 3.0 --alpha_floor 0.05
 --min_features 2 --max_features 100
 --save_temp_every 50 --save_perm_every 5000
 EOF
@@ -244,7 +243,6 @@ if (( _run_1 )); then
         --micro_batch_size 4 \
         --max_seq_len 1024 \
         --freeze_col True --freeze_row True \
-        --alpha_total_steps "${STAGE1_STEPS}" \
         --save_perm_every 5000
 fi
 

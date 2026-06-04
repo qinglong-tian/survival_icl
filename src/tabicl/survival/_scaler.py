@@ -156,22 +156,25 @@ def standardize_survival_micro_batch(
     delta_train: Tensor,
     t_test: Tensor,
     delta_test: Tensor,
-    t_event_test: Tensor,
+    t_event_test: Tensor | None,
     train_sizes_ds: Tensor,
     query_sizes_ds: Tensor,
     scaler_kwargs: dict[str, float],
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
     """Apply context-only KM-hybrid scaling to a survival micro-batch.
 
     Fit scaler on ``(t_train, delta_train)`` (context only), then transform
-    context, query, and ``t_event_test`` with the same scaler.  Query times
-    never influence ``loc`` or ``scale``.
+    context, query, and optionally ``t_event_test`` with the same scaler.
+    Query times never influence ``loc`` or ``scale``.
+
+    When ``t_event_test`` is ``None`` (NLL-only training), the fifth return
+    element is ``None``.
     """
     t_train_z = torch.empty_like(t_train)
     delta_train_z = torch.empty_like(delta_train, dtype=torch.float32)
     t_test_z = torch.empty_like(t_test)
     delta_test_z = torch.empty_like(delta_test, dtype=torch.float32)
-    t_event_test_z = torch.empty_like(t_event_test)
+    t_event_test_z = torch.empty_like(t_event_test) if t_event_test is not None else None
 
     context_pos = torch.arange(t_train.shape[1], device=t_train.device)
     query_pos = torch.arange(t_test.shape[1], device=t_test.device)
@@ -194,9 +197,10 @@ def standardize_survival_micro_batch(
 
         query_mask = query_pos < query_sizes_ds[ds_idx]
         q_t, q_delta = scaler.transform_observed(t_test[ds_idx], delta_test[ds_idx])
-        q_event = scaler.transform_event(t_event_test[ds_idx])
         t_test_z[ds_idx] = torch.where(query_mask, q_t, torch.zeros_like(q_t))
         delta_test_z[ds_idx] = torch.where(query_mask, q_delta, torch.zeros_like(q_delta))
-        t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
+        if t_event_test is not None and t_event_test_z is not None:
+            q_event = scaler.transform_event(t_event_test[ds_idx])
+            t_event_test_z[ds_idx] = torch.where(query_mask, q_event, torch.zeros_like(q_event))
 
     return t_train_z, delta_train_z, t_test_z, delta_test_z, t_event_test_z

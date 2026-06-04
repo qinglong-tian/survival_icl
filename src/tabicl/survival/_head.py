@@ -226,8 +226,15 @@ class TimeBinner:
         S_km1 = torch.exp(log_S[..., : self.num_bins])
         return h * S_km1
 
-    def expected_time(self, h_raw: Tensor) -> Tensor:
-        """Expected event time ``E[T] = Σ_k m_k · p_k``.
+    def standardized_time_summary(self, h_raw: Tensor) -> Tensor:
+        """Capped standardized-time summary with residual tail mass at ``z_max``.
+
+        Computes ``E[min(Z, z_max)] = Σ_k m_k · p_k + z_max · S(τ_K)``
+        where ``S(τ_K)`` is the probability mass beyond the last bin edge
+        (residual survival).  This is a proper restricted mean on the
+        standardized log-time axis, not a raw event time.
+
+        For raw-time quantities, apply each task's ``SurvivalTimeScaler.inverse_time``.
 
         Parameters
         ----------
@@ -235,59 +242,103 @@ class TimeBinner:
 
         Returns
         -------
-        Tensor, shape ``(...)`` (one fewer dim than input).
+        Tensor, shape ``(...)`` (one fewer dim than input), in standardized
+        log-time units.
         """
-        p = self.event_prob_mass(h_raw)
-        means = self.bin_means.to(device=h_raw.device, dtype=h_raw.dtype)
-        return (p * means).sum(dim=-1)
+        p = self.event_prob_mass(h_raw.float())  # (..., K)
+        means = self.bin_means.to(device=h_raw.device, dtype=torch.float32)  # (K,)
+        e_trunc = (p * means).sum(dim=-1)  # (...)
+        # Add residual tail: z_max times probability mass beyond τ_K
+        log_S = self.log_survival(h_raw.float())
+        S_K = torch.exp(log_S[..., -1])  # (...), S(τ_K)
+        z_max = self.bin_edges[-1].to(device=h_raw.device, dtype=torch.float32)
+        return (e_trunc + z_max * S_K).to(dtype=h_raw.dtype)
+
+    def expected_time(self, h_raw: Tensor) -> Tensor:
+        """Deprecated alias for :meth:`standardized_time_summary`.
+
+        The name is misleading because the returned values are standardized
+        log-times, not raw event times.  Use :meth:`standardized_time_summary`
+        directly in new code.
+        """
+        import warnings
+
+        warnings.warn(
+            "expected_time is deprecated — use standardized_time_summary for "
+            "capped standardized log-times.  For raw-time quantiles, apply "
+            "SurvivalTimeScaler.inverse_time.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.standardized_time_summary(h_raw)
 
     def quantile_at(self, h_raw: Tensor, probs: Tensor) -> Tensor:
         """Compute specified quantiles via linear interpolation of the CDF.
+
+        All internal computations are performed in float32 for numerical
+        stability.  Quantiles not reached by the finite-horizon CDF return
+        ``bin_edges[-1]`` (i.e. ``z_max``).
+
+        No GPU synchronizations occur after the initial validation.
 
         Parameters
         ----------
         h_raw : Tensor, shape ``(..., K)``
 
         probs : Tensor, shape ``(Q,)``
-            Probability levels in ``(0, 1)``.
+            Probability levels.  All entries must be finite and in (0, 1).
 
         Returns
         -------
-        Tensor, shape ``(..., Q)`` — quantile time for each requested level.
+        Tensor, shape ``(..., Q)`` — quantile time for each requested level,
+        always inside ``[bin_edges[0], bin_edges[-1]]``.
         """
-        edges = self.bin_edges.to(device=h_raw.device, dtype=h_raw.dtype)  # (K+1,)
-        F = self.cdf(h_raw)  # (..., K+1)
+        if probs.ndim != 1:
+            raise ValueError(f"probs must be 1D (Q,), got ndim={probs.ndim}")
+        if not torch.isfinite(probs).all():
+            raise ValueError("probs must be finite")
+        if not ((probs > 0) & (probs < 1)).all():
+            raise ValueError("probs must be in (0, 1)")
 
-        # For each probability level, find the first bin edge where F >= p
-        # F shape: (..., K+1), probs shape: (Q,)
-        # Expand for broadcasting: (..., 1, K+1) vs (Q, K+1)
-        F_exp = F.unsqueeze(-2)  # (..., 1, K+1)
-        probs_exp = probs.view(*([1] * (F.ndim - 1)), -1)  # (1, ..., 1, Q)
-        # We need F >= prob for each (..., Q, K+1)
-        # Reshape probs_exp to broadcast correctly
+        # Force float32 for CDF to avoid inf/nan in float16
+        F = self.cdf(h_raw.float())  # (..., K+1), float32
+        edges = self.bin_edges.to(device=h_raw.device, dtype=torch.float32)  # (K+1,)
+        z_max = edges[-1]  # scalar, float32
+        p = probs.to(device=h_raw.device, dtype=torch.float32)  # (Q,)
 
-        # Brute-force: loop over Q (typically ≤ 9)
-        results = []
-        for p in probs:
-            p_val = p.item()
-            # First bin where F >= p
-            above = F >= p_val  # (..., K+1)
-            # Get the index of the first True
-            k = above.float().argmax(dim=-1)  # (...)
-            k = k.clamp(min=1, max=self.num_bins)
+        # Vectorize across all probabilities: expand F for broadcast
+        # F: (..., K+1) -> (..., K+1, 1) broadcasts with p: (Q,) -> (..., K+1, Q)
+        F_exp = F.unsqueeze(-1)  # (..., K+1, 1)
 
-            # Linear interpolation between τ_{k-1} and τ_k
-            F_lo = F.gather(-1, (k - 1).unsqueeze(-1)).squeeze(-1)
-            F_hi = F.gather(-1, k.unsqueeze(-1)).squeeze(-1)
-            t_lo = edges[k - 1]
-            t_hi = edges[k]
-            # Guard against division by zero (when F_hi == F_lo, use t_lo)
-            denom = (F_hi - F_lo).clamp(min=1e-10)
-            frac = (p_val - F_lo) / denom
-            q = t_lo + frac * (t_hi - t_lo)
-            results.append(q)
+        # First bin where F >= p for each probability
+        above = F_exp >= p  # (..., K+1, Q)
+        any_above = above.any(dim=-2)  # (..., Q)
 
-        return torch.stack(results, dim=-1)  # (..., Q)
+        k = above.float().argmax(dim=-2)  # (..., Q)
+        k = torch.where(any_above, k, torch.full_like(k, self.num_bins))
+        k = k.clamp(min=1, max=self.num_bins)  # (..., Q)
+
+        # Gather F_lo, F_hi along the K+1 dimension for each probability.
+        km1_idx = (k - 1).unsqueeze(-2)  # (..., 1, Q)
+        k_idx = k.unsqueeze(-2)  # (..., 1, Q)
+        F_expanded = F_exp.expand(*F_exp.shape[:-1], k.shape[-1])  # (..., K+1, Q)
+        F_lo = F_expanded.gather(-2, km1_idx).squeeze(-2)  # (..., Q)
+        F_hi = F_expanded.gather(-2, k_idx).squeeze(-2)  # (..., Q)
+
+        t_lo = edges[(k - 1).clamp(min=0)]  # (..., Q)
+        t_hi = edges[k.clamp(max=self.num_bins)]  # (..., Q)
+
+        # Unreached quantile: return z_max
+        q = torch.where(any_above, torch.zeros_like(t_lo), torch.full_like(t_lo, z_max))
+
+        # Interpolate unconditionally; select with torch.where
+        denom = (F_hi - F_lo).clamp(min=1e-10)
+        frac = ((p - F_lo) / denom).clamp(0.0, 1.0)
+        q_interp = t_lo + frac * (t_hi - t_lo)
+        q = torch.where(any_above, q_interp, q)
+        q = q.clamp(edges[0], z_max)
+
+        return q.to(dtype=h_raw.dtype)  # (..., Q)
 
     def to(self, device: torch.device) -> "TimeBinner":
         """Return a copy with tensors moved to ``device``."""

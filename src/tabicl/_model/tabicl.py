@@ -197,7 +197,10 @@ class TabICL(nn.Module):
 
         # Determine task type
         if survival:
-            out_dim = num_quantiles  # placeholder; decoder is replaced at runtime
+            if num_quantiles <= 0:
+                raise ValueError("For survival mode, num_quantiles (bin count) must be greater than 0.")
+            max_classes = 0  # force regression mode — classification branch can't handle survival
+            out_dim = num_quantiles  # K bins → passed to ICLearning which builds survival head
             self.quantile_dist = None
         elif max_classes == 0:  # Regression
             if num_quantiles <= 0:
@@ -295,6 +298,59 @@ class TabICL(nn.Module):
         """Clear the stored cache."""
         self._cache = None
 
+    def configure_survival(self, num_bins: int) -> "TabICL":
+        """Convert a loaded regression model for survival prediction.
+
+        Updates the ICL predictor's y_encoder to a two-channel ``(time, delta)``
+        encoder, swaps the decoder to a :class:`DiscreteTimeSurvivalHead`, and
+        adjusts survival flags and the inference manager output dimension.
+
+        This is the single supported conversion path from a pretrained regressor
+        (loaded from Hugging Face Hub or a local checkpoint).
+
+        Parameters
+        ----------
+        num_bins : int
+            Number of discrete time bins ``K`` for the survival head.
+
+        Raises
+        ------
+        ValueError
+            If the model is a classifier (``max_classes != 0``) or
+            ``num_bins <= 0``.
+        """
+        from tabicl.survival._head import DiscreteTimeSurvivalHead
+
+        if self.max_classes != 0:
+            raise ValueError(
+                f"configure_survival requires a regression model (max_classes=0), "
+                f"got max_classes={self.max_classes}."
+            )
+        if num_bins <= 0:
+            raise ValueError(f"num_bins must be > 0, got {num_bins}.")
+
+        self.survival = True
+        self.icl_predictor.survival = True
+        icl_dim = self.embed_dim * self.row_num_cls
+        self.icl_predictor.y_encoder = nn.Linear(2, icl_dim).to(
+            device=self.icl_predictor.y_encoder.weight.device,
+            dtype=self.icl_predictor.y_encoder.weight.dtype,
+        )
+        self.icl_predictor.decoder = DiscreteTimeSurvivalHead(
+            d_model=icl_dim, num_bins=num_bins,
+        ).to(
+            device=next(self.icl_predictor.decoder.parameters()).device,
+            dtype=next(self.icl_predictor.decoder.parameters()).dtype,
+        )
+        self.icl_predictor.inference_mgr.out_dim = num_bins
+        self.num_quantiles = num_bins
+        self.max_classes = 0
+        self.quantile_dist = None
+        # Clear any previously cached regression representations — the target
+        # encoder changed from 1-channel to 2-channel (t, delta).
+        self.clear_cache()
+        return self
+
     def _train_forward(
         self, X: Tensor, y_train: Tensor, d: Optional[Tensor] = None,
         embed_with_test: bool = False, delta_train: Optional[Tensor] = None,
@@ -366,6 +422,7 @@ class TabICL(nn.Module):
         return_logits: bool = True,
         softmax_temperature: float = 0.9,
         inference_config: Optional[InferenceConfig] = None,
+        delta_train: Optional[Tensor] = None,
     ) -> Tensor:
         """Column-wise embedding -> row-wise interaction -> dataset-wise in-context learning.
 
@@ -436,6 +493,7 @@ class TabICL(nn.Module):
             return_logits=return_logits,
             softmax_temperature=softmax_temperature,
             mgr_config=inference_config.ICL_CONFIG,
+            delta_train=delta_train,
         )
 
         return out
@@ -521,6 +579,7 @@ class TabICL(nn.Module):
                 return_logits=return_logits,
                 softmax_temperature=softmax_temperature,
                 inference_config=inference_config,
+                delta_train=delta_train,
             )
 
         return out
@@ -583,6 +642,12 @@ class TabICL(nn.Module):
                 the number of quantile levels configured in the model architecture.
         """
         assert self.max_classes == 0, "predict_stats is only applicable for regression tasks"
+        if self.survival:
+            raise RuntimeError(
+                "predict_stats is not supported for survival models. "
+                "Use forward() to obtain raw hazard logits and interpret them "
+                "via TimeBinner / SurvivalTimeScaler."
+            )
 
         raw_quantiles = self._inference_forward(
             X, y_train, embed_with_test=embed_with_test, inference_config=inference_config
@@ -628,6 +693,7 @@ class TabICL(nn.Module):
         cache: Optional[TabICLCache] = None,
         cache_mode: str = "kv",
         inference_config: Optional[InferenceConfig] = None,
+        delta_train: Optional[Tensor] = None,
     ) -> Optional[Tensor]:
         """Forward pass with caching support for efficient inference.
 
@@ -712,6 +778,15 @@ class TabICL(nn.Module):
         if use_cache == store_cache:
             raise ValueError("Exactly one of use_cache or store_cache must be True")
 
+        # Cache mismatch guard: reject regression cache with survival model or vice versa.
+        if use_cache and self._cache is not None and not self._cache.is_empty():
+            if self._cache.survival != self.survival:
+                raise ValueError(
+                    f"Cache task mismatch: cache.survival={self._cache.survival}, "
+                    f"model.survival={self.survival}. Clear the cache or use the "
+                    f"correct model."
+                )
+
         if cache_mode not in ("kv", "repr"):
             raise ValueError(f"cache_mode must be 'kv' or 'repr', got '{cache_mode}'")
 
@@ -728,7 +803,10 @@ class TabICL(nn.Module):
 
             # Initialize cache based on training data
             num_classes = len(torch.unique(y_train[0])) if self.max_classes > 0 else 0
-            self._cache = TabICLCache(train_shape=X_train.shape, num_classes=num_classes)
+            self._cache = TabICLCache(
+                train_shape=X_train.shape, num_classes=num_classes,
+                survival=self.survival,
+            )
 
             if X_test is None:
                 X = X_train
@@ -763,7 +841,9 @@ class TabICL(nn.Module):
             if store_cache:
                 train_size = y_train.shape[1]
                 # Bake y_train into train portion of representations
-                representations = self.icl_predictor.prepare_repr_cache(representations, y_train)
+                representations = self.icl_predictor.prepare_repr_cache(
+                    representations, y_train, delta_train=delta_train,
+                )
                 self._cache.row_repr = representations[:, :train_size]
 
                 if X_test is None:
@@ -787,6 +867,7 @@ class TabICL(nn.Module):
                 representations,
                 icl_cache=self._cache.icl_cache,
                 y_train=y_train,
+                delta_train=delta_train,
                 num_classes=self._cache.num_classes,
                 return_logits=return_logits,
                 softmax_temperature=softmax_temperature,
@@ -859,19 +940,29 @@ class TabICL(nn.Module):
 
         Returns
         -------
-        Tensor or dict of Tensors or None
-            None if store_cache=True and X_test is not provided. Otherwise:
+        Optional[Tensor or Dict[str, Tensor]]
+            Summary statistic(s) computed from predicted quantiles, or None
+            when ``store_cache=True`` and ``X_test`` is not provided (cache-only
+            call).
 
-            - If `output_type` is a single string: returns the corresponding tensor.
-            - If `output_type` is a list: returns a dict mapping names to tensors.
+            - If ``output_type`` is a single string, returns the requested
+              summary tensor of shape ``(B, test_size)`` (e.g. ``"mean"``,
+              ``"variance"``, ``"median"``) or, for ``"quantiles"``,
+              ``(B, test_size, len(alphas))``.
+            - If ``output_type`` is a list, returns a ``dict`` mapping each
+              requested key to its summary tensor.
 
-            Output shapes:
-
-            - "mean", "variance", "median": (B, test_size)
-            - "quantiles": (B, test_size, len(alphas))
-            - "raw_quantiles": (B, test_size, num_quantiles), where `num_quantiles` denotes 
-                the number of quantile levels configured in the model architecture.
+        Raises
+        ------
+        RuntimeError
+            If the model is in survival mode — use ``forward_with_cache()``.
         """
+        if self.survival:
+            raise RuntimeError(
+                "predict_stats_with_cache is not supported for survival models. "
+                "Use forward_with_cache() to obtain raw hazard logits and interpret "
+                "them via TimeBinner / SurvivalTimeScaler."
+            )
         assert self.max_classes == 0, "predict_stats_with_cache is only applicable for regression tasks"
 
         raw_quantiles = self.forward_with_cache(
