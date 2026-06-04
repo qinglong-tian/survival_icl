@@ -214,13 +214,19 @@ bash scripts/train_survival_curriculum.sh
 Trains one mixed PH/AFT survival foundation model in 3 stages
 (small fixed-length → medium variable-length → large variable-length).
 All data is generated on-the-fly; no disk pre-generation is required.
+Stages 1 and 2 train the full model. Stage 3 freezes the column and row
+encoders while refining the ICL predictor and survival head. The optimization
+schedule follows the original TabICL recipe: `1e-4` cosine with warmup,
+`2e-5 → 5e-6` polynomial decay, then constant `2e-6`.
 
 Optional environment overrides:
 ```bash
-RUN_STAGES=1,2,3    # which stages to run
-STAGE1_STEPS=100000 # override per-stage step count
-NPROC_PER_NODE=1    # GPUs
-WANDB_MODE=offline  # online/offline/disabled
+RUN_STAGES=1,2,3                     # which stages to run
+CURRICULUM_ID=author_adapted_v1      # checkpoint namespace
+STAGE1_STEPS=100000                  # override per-stage step count
+SURVIVAL_QUERY_PINBALL_WEIGHT=0.0    # optional oracle-query pinball weight
+NPROC_PER_NODE=1                     # GPUs
+WANDB_MODE=offline                   # online/offline/disabled
 ```
 
 The previous disk-based generation script is archived at

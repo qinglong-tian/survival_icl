@@ -12,9 +12,9 @@
 #   WANDB_MODE   — wandb mode (default: offline)
 #
 # Stages (small steps for fast validation):
-#   Stage 1 (20 steps): fixed-length 128, freeze encoders, HF Hub init
-#   Stage 2 (20 steps): variable-length 128–512, freeze encoders, load Stage 1
-#   Stage 3 (10 steps): variable-length 256–1024, unfreeze all, load Stage 2
+#   Stage 1 (20 steps): fixed-length 128, train all modules, HF Hub init
+#   Stage 2 (20 steps): variable-length 128–512, train all modules, load Stage 1
+#   Stage 3 (10 steps): variable-length 256–1024, freeze encoders, load Stage 2
 #
 # Gates:
 #   1. Imports OK (tabicl.survival, SurvivalPriorDataset)
@@ -128,7 +128,6 @@ TRAIN_FLAGS=(
     --amp "$AMP"
     --np_seed 42 --torch_seed 42
     --batch_size 128
-    --scheduler cosine_warmup --warmup_proportion 0.02
     --gradient_clipping 1.0
     --num_bins 50
     --min_features 2 --max_features 100
@@ -145,11 +144,11 @@ _run_python() {
     python src/tabicl/train/_run.py "$@"
 }
 
-# ---- Stage 1: small fixed-length, freeze encoders, HF Hub init ------------
+# ---- Stage 1: small fixed-length, full model, HF Hub init ------------------
 
 echo ""
 echo "============================================"
-echo "  Stage 1 — fixed length 128, freeze encoders"
+echo "  Stage 1 — fixed length 128, full model"
 echo "  Init from: HF Hub"
 echo "============================================"
 
@@ -163,9 +162,9 @@ _run_python \
     --wandb_name "Preflight-Stage1" \
     --max_steps 20 \
     --lr 1e-4 \
+    --scheduler cosine_warmup --warmup_proportion 0.02 \
     --batch_size_per_gp 4 --micro_batch_size 4 \
     --max_seq_len 128 \
-    --freeze_col True --freeze_row True \
     --checkpoint_dir "$CKPT_DIR/stage1" \
     --save_temp_every 20 --save_perm_every 20
 
@@ -176,7 +175,7 @@ if [[ ! -f "$STAGE1_CKPT" ]]; then
 fi
 echo "Stage 1 complete: $(ls -lh "$STAGE1_CKPT" | awk '{print $5}')"
 
-# ---- Stage 2: medium variable-length, freeze encoders, load Stage 1 --------
+# ---- Stage 2: medium variable-length, full model, load Stage 1 -------------
 
 echo ""
 echo "============================================"
@@ -193,11 +192,12 @@ _run_python \
     "${WANDB_FLAGS[@]}" \
     --wandb_name "Preflight-Stage2" \
     --max_steps 20 \
-    --lr 1e-5 \
+    --lr 2e-5 \
+    --scheduler polynomial_decay_warmup --warmup_proportion 0 \
+    --poly_decay_lr_end 5e-6 --poly_decay_power 2.0 \
     --batch_size_per_gp 2 --micro_batch_size 2 \
     --min_seq_len 128 --max_seq_len 512 \
     --log_seq_len True --seq_len_per_gp True \
-    --freeze_col True --freeze_row True \
     --pretrained_path "$STAGE1_CKPT" \
     --checkpoint_dir "$CKPT_DIR/stage2" \
     --save_temp_every 20 --save_perm_every 20
@@ -209,11 +209,11 @@ if [[ ! -f "$STAGE2_CKPT" ]]; then
 fi
 echo "Stage 2 complete: $(ls -lh "$STAGE2_CKPT" | awk '{print $5}')"
 
-# ---- Stage 3: large variable-length, unfreeze all, load Stage 2 ------------
+# ---- Stage 3: large variable-length, freeze encoders, load Stage 2 ----------
 
 echo ""
 echo "============================================"
-echo "  Stage 3 — variable length 256–1024, unfreeze all"
+echo "  Stage 3 — variable length 256–1024, freeze encoders"
 echo "  Init from: $STAGE2_CKPT"
 echo "============================================"
 
@@ -226,11 +226,13 @@ _run_python \
     "${WANDB_FLAGS[@]}" \
     --wandb_name "Preflight-Stage3" \
     --max_steps 10 \
-    --lr 1e-5 \
+    --lr 2e-6 \
+    --scheduler constant \
     --batch_size_per_gp 1 --micro_batch_size 1 \
     --min_seq_len 256 --max_seq_len 1024 \
     --log_seq_len True --seq_len_per_gp True \
     --replay_small True \
+    --freeze_col True --freeze_row True \
     --pretrained_path "$STAGE2_CKPT" \
     --checkpoint_dir "$CKPT_DIR/stage3" \
     --save_temp_every 10 --save_perm_every 10

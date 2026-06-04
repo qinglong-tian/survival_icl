@@ -21,7 +21,9 @@
 #   2. surv_nll + impute remain finite in logs
 #   3. alpha decays smoothly (3.0 → floor)
 #   4. No OOM micro-batch skips
-#   5. Per-step time reasonably stable
+#   5. Event-supervised, context-calibrated training remains stable
+#   6. Full-model Stage 1 training remains stable
+#   7. Per-step time reasonably stable
 # ==========================================================================
 
 set -euo pipefail
@@ -162,6 +164,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --max_seq_len 1024 \
     --min_train_size 1.0 \
     --max_train_size 1.0 \
+    --survival_query_supervision event \
+    --censor_calibration_scope context \
+    --survival_query_pinball_weight 0.0 \
     --survival_model_type ph \
     --survival_beta 1.0 \
     --baseline_types weibull,gompertz,loglogistic,lognormal \
@@ -185,8 +190,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --icl_nhead 4 \
     --ff_factor 2 \
     --norm_first True \
-    --freeze_col True \
-    --freeze_row True \
     --checkpoint_dir "${CKPT_DIR}" \
     --save_temp_every 100 \
     --save_perm_every 100 \

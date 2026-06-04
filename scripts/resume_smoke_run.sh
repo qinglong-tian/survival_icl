@@ -26,6 +26,8 @@
 #   3. step-350.ckpt exists
 #   4. surv_nll + impute remain finite after resume
 #   5. No optimizer/scheduler load-state errors
+#   6. Event-supervised, context-calibrated configuration restores cleanly
+#   7. Full-model Stage 1 training resumes successfully
 # ==========================================================================
 
 set -euo pipefail
@@ -177,6 +179,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --max_seq_len 1024 \
     --min_train_size 1.0 \
     --max_train_size 1.0 \
+    --survival_query_supervision event \
+    --censor_calibration_scope context \
+    --survival_query_pinball_weight 0.0 \
     --survival_model_type ph \
     --survival_beta 1.0 \
     --baseline_types weibull,gompertz,loglogistic,lognormal \
@@ -200,8 +205,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --icl_nhead 4 \
     --ff_factor 2 \
     --norm_first True \
-    --freeze_col True \
-    --freeze_row True \
     --checkpoint_dir "${CKPT_DIR}" \
     --checkpoint_path "${RESUME_CKPT}" \
     --save_perm_every 50 \

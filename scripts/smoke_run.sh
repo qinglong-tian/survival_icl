@@ -21,7 +21,9 @@
 #   - TabICL regressor download from Hugging Face Hub
 #   - Survival head + y_encoder swap
 #   - SurvivalPriorDataset on-the-fly generation
+#   - Event-time query supervision with context-only censor calibration
 #   - DDP multi-GPU training
+#   - Full-model Stage 1 parameter updates
 #   - 50-step training with loss convergence
 #   - Checkpoint save at step 50
 # ==========================================================================
@@ -165,6 +167,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --max_seq_len 1024 \
     --min_train_size 1.0 \
     --max_train_size 1.0 \
+    --survival_query_supervision event \
+    --censor_calibration_scope context \
+    --survival_query_pinball_weight 0.0 \
     --survival_model_type ph \
     --survival_beta 1.0 \
     --baseline_types weibull,gompertz,loglogistic,lognormal \
@@ -188,8 +193,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --icl_nhead 4 \
     --ff_factor 2 \
     --norm_first True \
-    --freeze_col True \
-    --freeze_row True \
     --checkpoint_dir "${CKPT_DIR}" \
     --save_temp_every 100 \
     --save_perm_every 50 \
