@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=h100:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --time=00:30:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
@@ -87,7 +87,7 @@ if [[ ! "$GPU_COUNT" =~ ^[0-9]+$ ]] || (( GPU_COUNT != 2 )); then
     echo "ERROR: This launcher requires exactly 2 allocated GPUs (got '${SLURM_GPUS_ON_NODE:-unset}')." >&2
     exit 2
 fi
-CPU_COUNT="${SLURM_CPUS_PER_TASK:-24}"
+CPU_COUNT="${SLURM_CPUS_PER_TASK:-8}"
 
 export CURRICULUM_ID
 export RUN_MODE
