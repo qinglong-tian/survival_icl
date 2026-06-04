@@ -161,7 +161,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC" --master_port="$MASTE
     --task survival \
     --device cuda \
     --dtype float32 \
-    --amp True \
+    --amp False \
     --np_seed 42 \
     --torch_seed 42 \
     --max_steps "${TARGET_STEP}" \

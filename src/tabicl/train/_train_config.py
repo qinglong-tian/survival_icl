@@ -49,7 +49,10 @@ def build_parser():
     ###########################################################################
     parser.add_argument("--device", default="cuda", type=str, help="Device for training: cpu, cuda, cuda:0")
     parser.add_argument(
-        "--dtype", default="float32", type=str, help="Data type (supported for float16, float32) used for training"
+        "--dtype",
+        default="float32",
+        choices=["float16", "bfloat16", "float32"],
+        help="Autocast data type. float32 disables autocast even when --amp=True.",
     )
     parser.add_argument("--np_seed", type=int, default=42, help="Random seed for numpy")
     parser.add_argument("--torch_seed", type=int, default=42, help="Random seed for torch")
@@ -63,6 +66,12 @@ def build_parser():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument(
         "--scheduler", type=str, default="cosine_warmup", help="Learning rate scheduler: see optim.py for options."
+    )
+    parser.add_argument(
+        "--scheduler_total_steps",
+        type=int,
+        default=None,
+        help="Total scheduler horizon. Defaults to max_steps; set independently for chunked training.",
     )
     parser.add_argument(
         "--warmup_proportion",

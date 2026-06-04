@@ -92,8 +92,8 @@ def discrete_survival_nll(
     nll_event = -(log_h_k + log_S_km1)
     nll_cens = -log_S_k
 
-    delta_f = delta.float()
-    nll = delta_f * nll_event + (1.0 - delta_f) * nll_cens
+    is_event = delta > 0.5
+    nll = torch.where(is_event, nll_event, nll_cens)
 
     return nll.mean()
 

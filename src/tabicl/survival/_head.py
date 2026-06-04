@@ -400,4 +400,5 @@ class DiscreteTimeSurvivalHead(nn.Module):
         -------
         Tensor, shape ``(..., num_bins)`` — raw logits ``h_raw``.
         """
-        return self.head(z)
+        h = self.head(z)
+        return h.clamp(-20.0, 20.0)

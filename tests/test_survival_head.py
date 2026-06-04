@@ -55,6 +55,30 @@ def test_nll_finite_under_float16():
     assert loss.item() > 0
 
 
+def test_nll_event_ignores_infinite_censoring_branch():
+    """An impossible censoring branch must not create 0 * inf = nan."""
+    h_raw = torch.tensor([[float("inf"), float("inf")]])
+    loss = discrete_survival_nll(
+        h_raw,
+        bin_idx=torch.tensor([0]),
+        delta=torch.tensor([1.0]),
+    )
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(0.0)
+
+
+def test_nll_censoring_ignores_infinite_event_branch():
+    """An impossible event branch must not create 0 * inf = nan."""
+    h_raw = torch.tensor([[-float("inf"), -float("inf")]])
+    loss = discrete_survival_nll(
+        h_raw,
+        bin_idx=torch.tensor([0]),
+        delta=torch.tensor([0.0]),
+    )
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(0.0)
+
+
 def test_nll_multi_bin_event():
     """Event at bin 2: includes hazard of bins 0,1 in survival term."""
     h_raw = torch.tensor([[0.0, 0.0, 0.0]])  # all h = 0.5

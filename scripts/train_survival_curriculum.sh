@@ -14,6 +14,8 @@
 #                        Token-validated; empty/invalid/duplicate rejected.
 #   CURRICULUM_ID      — checkpoint namespace (default: author_adapted_v1)
 #   STAGE1_STEPS       — override Stage 1 max steps (default: 100000)
+#   STAGE1_SCHEDULER_STEPS
+#                      — Stage 1 LR horizon for chunked runs (default: STAGE1_STEPS)
 #   STAGE2_STEPS       — override Stage 2 max steps (default: 2000)
 #   STAGE3_STEPS       — override Stage 3 max steps (default: 50)
 #   SURVIVAL_QUERY_PINBALL_WEIGHT
@@ -52,6 +54,7 @@ RUN_STAGES="${RUN_STAGES-1,2,3}"
 CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
 
 STAGE1_STEPS="${STAGE1_STEPS:-100000}"
+STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-${STAGE1_STEPS}}"
 STAGE2_STEPS="${STAGE2_STEPS:-2000}"
 STAGE3_STEPS="${STAGE3_STEPS:-50}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
@@ -147,6 +150,15 @@ if (( _run_1 )); then
     if (( STAGE1_STEPS <= 0 )); then
         echo "ERROR: Stage1 steps must be a positive integer (got ${STAGE1_STEPS})" >&2; exit 1
     fi
+    if [[ ! "$STAGE1_SCHEDULER_STEPS" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Stage1 scheduler steps must be a positive decimal integer (got ${STAGE1_SCHEDULER_STEPS})" >&2
+        exit 1
+    fi
+    STAGE1_SCHEDULER_STEPS=$((10#${STAGE1_SCHEDULER_STEPS}))
+    if (( STAGE1_SCHEDULER_STEPS < STAGE1_STEPS )); then
+        echo "ERROR: Stage1 scheduler steps (${STAGE1_SCHEDULER_STEPS}) must be >= Stage1 steps (${STAGE1_STEPS})" >&2
+        exit 1
+    fi
     if (( STAGE1_STEPS % _stg1_every != 0 )); then
         echo "ERROR: Stage1 steps (${STAGE1_STEPS}) must be divisible by ${_stg1_every}" >&2
         echo "       to produce a checkpoint." >&2; exit 1
@@ -217,7 +229,7 @@ read -r -d '' TRAIN_FLAGS <<'EOF' || true
 --task survival
 --device cuda
 --dtype float32
---amp True
+--amp False
 --np_seed 42 --torch_seed 42
 --batch_size 512
 --gradient_clipping 1.0
@@ -264,6 +276,7 @@ if (( _run_1 )); then
     run_stage "Stage1" "${STAGE1_DIR}" "${STAGE1_STEPS}" "" \
         --lr 1e-4 \
         --scheduler cosine_warmup \
+        --scheduler_total_steps "${STAGE1_SCHEDULER_STEPS}" \
         --warmup_proportion 0.02 \
         --batch_size_per_gp 4 \
         --micro_batch_size 4 \

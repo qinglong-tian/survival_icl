@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.multiprocessing import set_start_method
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import all_reduce, init_process_group, destroy_process_group, ReduceOp
 
 from tqdm import tqdm
 
@@ -730,18 +730,31 @@ class Trainer:
     def configure_amp(self):
         """Configure automatic mixed precision (AMP) for training."""
         _cuda_available = torch.cuda.is_available()
-        self.amp = self.config.amp and "cuda" in self.config.device and _cuda_available
+        amp_dtype = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }[self.config.dtype]
+        self.amp = (
+            self.config.amp
+            and "cuda" in self.config.device
+            and _cuda_available
+            and amp_dtype != torch.float32
+        )
         if _cuda_available:
-            self.scaler = torch.GradScaler("cuda", enabled=self.amp)
+            self.scaler = torch.GradScaler(
+                "cuda",
+                enabled=self.amp and amp_dtype == torch.float16,
+            )
         else:
             self.scaler = torch.GradScaler(enabled=False)
         if self.amp:
             if self.master_process:
-                print(f"Automatic Mixed Precision is enabled.")
-            self.amp_ctx = torch.autocast(
-                device_type="cuda", dtype=torch.float16 if self.config.dtype == "float16" else torch.float32
-            )
+                print(f"Automatic Mixed Precision is enabled with {self.config.dtype}.")
+            self.amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype)
         else:
+            if self.master_process and self.config.amp and amp_dtype == torch.float32:
+                print("Automatic Mixed Precision is disabled because dtype=float32.")
             self.amp_ctx = nullcontext()
 
     # ------------------------------------------------------------------
@@ -1293,8 +1306,12 @@ class Trainer:
         self.scaler.scale(scaled_loss).backward()
 
         with torch.no_grad():
+            loss_value = loss.item()
+            nonfinite_logit_count = (~torch.isfinite(h_raw_flat)).sum().item()
             micro_results = {
                 "surv_nll": surv_nll.item() / num_micro_batches,
+                "_nonfinite_loss_count": float(not math.isfinite(loss_value)),
+                "_nonfinite_logit_count": nonfinite_logit_count,
             }
             if event_mode:
                 micro_results["query_n_valid"] = n_valid
@@ -1339,7 +1356,11 @@ class Trainer:
         micro_batches = list(zip(*micro_batches))
 
         if self.survival:
-            results = {"surv_nll": 0.0}
+            results = {
+                "surv_nll": 0.0,
+                "_nonfinite_loss_count": 0.0,
+                "_nonfinite_logit_count": 0.0,
+            }
             if self.query_supervision == "event":
                 results["query_n_valid"] = 0.0
                 results["query_n_underflow"] = 0.0
@@ -1372,6 +1393,26 @@ class Trainer:
                 f"Please check configuration to reduce memory consumption."
             )
 
+        if self.survival:
+            nonfinite = torch.tensor(
+                [
+                    results.pop("_nonfinite_loss_count"),
+                    results.pop("_nonfinite_logit_count"),
+                ],
+                device=self.config.device,
+                dtype=torch.float32,
+            )
+            if self.ddp:
+                all_reduce(nonfinite, op=ReduceOp.SUM)
+            if nonfinite[0].item() > 0 or nonfinite[1].item() > 0:
+                self.optimizer.zero_grad(set_to_none=True)
+                raise FloatingPointError(
+                    f"Non-finite survival numerics detected at step {self.curr_step}: "
+                    f"{int(nonfinite[0].item())} bad micro-batch loss(es), "
+                    f"{int(nonfinite[1].item())} non-finite hazard logit(s) across all ranks. "
+                    "The optimizer step was aborted."
+                )
+
         if self.survival and self.query_supervision == "event":
             n_valid = results.pop("query_n_valid")
             if n_valid > 0:
@@ -1388,7 +1429,11 @@ class Trainer:
 
         if self.config.gradient_clipping > 0:
             self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clipping)
+            nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                self.config.gradient_clipping,
+                error_if_nonfinite=True,
+            )
 
         self.scaler.step(self.optimizer)
         self.scaler.update()

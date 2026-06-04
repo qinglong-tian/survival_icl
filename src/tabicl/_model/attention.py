@@ -19,6 +19,18 @@ except ImportError:
 _use_flash_attn3 = True
 
 
+def _can_use_flash_attn3(q: Tensor, attn_mask: Optional[Tensor], dropout_p: float) -> bool:
+    """Return whether FA3 can run without silently changing precision."""
+    return (
+        HAS_FLASH_ATTN3
+        and _use_flash_attn3
+        and q.is_cuda
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and attn_mask is None
+        and dropout_p == 0.0
+    )
+
+
 @contextmanager
 def flash_attn3_toggle(enabled: bool):
     """Context manager to temporarily enable or disable Flash Attention 3.
@@ -96,24 +108,16 @@ def sdpa_with_flattened_batch(
         q = ssmax_layer(q, src_len)
 
     # FlashAttn3 doesn't support dropout and custom attention mask
-    if HAS_FLASH_ATTN3 and _use_flash_attn3 and q.is_cuda and attn_mask is None and dropout_p == 0.0:
-        # FlashAttention only supports fp16, bf16, and fp8_e4m3
-        # Convert to bf16 if needed, then convert back to original dtype
-        orig_dtype = q.dtype
-        if orig_dtype not in (torch.float16, torch.bfloat16):
-            fa_dtype = torch.float16
-        else:
-            fa_dtype = orig_dtype
-
+    if _can_use_flash_attn3(q, attn_mask, dropout_p):
         flat_bs, nheads, seqlen_q, headdim = q.shape
         seqlen_k = k.shape[-2]
-        q_fa = q.transpose(1, 2).reshape(flat_bs * seqlen_q, nheads, headdim).contiguous().to(fa_dtype)
-        k_fa = k.transpose(1, 2).reshape(flat_bs * seqlen_k, nheads, headdim).contiguous().to(fa_dtype)
-        v_fa = v.transpose(1, 2).reshape(flat_bs * seqlen_k, nheads, headdim).contiguous().to(fa_dtype)
+        q_fa = q.transpose(1, 2).reshape(flat_bs * seqlen_q, nheads, headdim).contiguous()
+        k_fa = k.transpose(1, 2).reshape(flat_bs * seqlen_k, nheads, headdim).contiguous()
+        v_fa = v.transpose(1, 2).reshape(flat_bs * seqlen_k, nheads, headdim).contiguous()
         cu_seqlens_q = torch.arange(0, (flat_bs + 1) * seqlen_q, seqlen_q, dtype=torch.int32, device=q.device)
         cu_seqlens_k = torch.arange(0, (flat_bs + 1) * seqlen_k, seqlen_k, dtype=torch.int32, device=q.device)
         out = flash_attn3(q_fa, k_fa, v_fa, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k)
-        out = out.view(flat_bs, seqlen_q, nheads, headdim).transpose(1, 2).to(orig_dtype)
+        out = out.view(flat_bs, seqlen_q, nheads, headdim).transpose(1, 2)
     else:
         out = F.scaled_dot_product_attention(q, k, v, attn_mask, dropout_p)
 
