@@ -167,6 +167,12 @@ def build_parser():
         "--prior_type", default="mix_scm", type=str, help="Prior type: dummy, mlp_scm, tree_scm, mix_scm"
     )
     parser.add_argument("--prior_device", default="cpu", type=str, help="Device for prior data generation")
+    parser.add_argument(
+        "--prior_num_workers",
+        type=int,
+        default=1,
+        help="DataLoader workers for prior prefetching. Set to 0 for synchronous (macOS safe).",
+    )
 
     ###########################################################################
     ##### Model Architecture Config ###########################################

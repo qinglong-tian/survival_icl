@@ -128,6 +128,7 @@ TRAIN_FLAGS=(
     --amp "$AMP"
     --np_seed 42 --torch_seed 42
     --batch_size 128
+    --prior_num_workers 0
     --gradient_clipping 1.0
     --num_bins 50
     --min_features 2 --max_features 100

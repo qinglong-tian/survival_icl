@@ -672,14 +672,17 @@ class Trainer:
         if self.master_process:
             print(dataset)
 
-        # num_workers=0: fork is unsafe with PyTorch+CUDA loaded on any platform.
-        # On-the-fly data generation runs synchronously in the main process.
-        # This is fast enough for CPU-side SCM generation (<< GPU compute time).
+        # DataLoader workers run prior generation in background via spawn multiprocessing.
+        # On Linux with set_start_method("spawn") this is safe: workers are fresh processes
+        # with no inherited CUDA context and only run CPU-side SCM → survival sampling.
+        # macOS users should set --prior_num_workers 0 if spawn pickling is problematic.
+        prior_workers = getattr(self.config, "prior_num_workers", 1)
         self.dataloader = DataLoader(
             dataset,
             batch_size=None,
             shuffle=False,
-            num_workers=0,
+            num_workers=prior_workers,
+            persistent_workers=(prior_workers > 0),
             pin_memory=False,
         )
 
