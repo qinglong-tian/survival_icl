@@ -92,10 +92,10 @@ def test_float32_configuration_disables_amp_and_grad_scaler(monkeypatch):
     """Requested float32 training must not silently enable AMP machinery."""
     from contextlib import nullcontext
 
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     trainer = _make_minimal_trainer(
         _make_tiny_config(device="cuda", amp=True, dtype="float32")
     )
-    trainer.cuda_enabled = True
 
     trainer.configure_amp()
 

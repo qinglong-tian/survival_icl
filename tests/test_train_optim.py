@@ -10,14 +10,9 @@ import torch
 from tabicl.train._optim import get_scheduler
 
 
-def _config(
-    *,
-    max_steps: int,
-    scheduler_total_steps: int | None,
-    scheduler: str = "cosine_warmup",
-):
+def _config(*, max_steps: int, scheduler_total_steps: int | None):
     return SimpleNamespace(
-        scheduler=scheduler,
+        scheduler="cosine_warmup",
         max_steps=max_steps,
         scheduler_total_steps=scheduler_total_steps,
         warmup_proportion=0.02,
@@ -69,30 +64,3 @@ def test_scheduler_horizon_cannot_end_before_training():
 
     with pytest.raises(ValueError, match="must be greater than or equal"):
         get_scheduler(_config(max_steps=100, scheduler_total_steps=50), optimizer)
-
-
-@pytest.mark.parametrize(
-    ("scheduler_name", "expected_lrs"),
-    [
-        ("constant", [1e-4, 1e-4, 1e-4, 1e-4]),
-        ("linear_warmup", [0.0, 5e-5, 1e-4, 0.0]),
-        ("cosine_warmup", [0.0, 5e-5, 1e-4, 0.0]),
-        ("polynomial_decay_warmup", [0.0, 5e-5, 1e-4, 1e-7]),
-    ],
-)
-def test_scheduler_endpoints_match_original_transformers_formulas(
-    scheduler_name,
-    expected_lrs,
-):
-    parameter = torch.nn.Parameter(torch.tensor(0.0))
-    optimizer = torch.optim.AdamW([parameter], lr=1e-4)
-    config = _config(max_steps=10, scheduler_total_steps=10, scheduler=scheduler_name)
-    config.warmup_proportion = 0.2
-    scheduler = get_scheduler(config, optimizer)
-
-    actual_lrs = [scheduler.get_last_lr()[0]]
-    for steps in [1, 1, 8]:
-        _step(optimizer, scheduler, steps)
-        actual_lrs.append(scheduler.get_last_lr()[0])
-
-    assert actual_lrs == pytest.approx(expected_lrs)

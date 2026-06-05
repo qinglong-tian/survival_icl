@@ -63,10 +63,12 @@ shap = [
     "numba",  # Add it here to facilitate the life of the installer
 ]
 pretrain = [
+    "transformers",  # only used in optim for schedules
     "xgboost",  # used in the TabICLv1 prior
     "wandb",  # logging in pre-training
 ]
 finetune = [
+    "transformers",  # get_scheduler reuses the pretraining cosine-warmup schedules
     "wandb",  # optional, only engaged when wandb_kwargs is passed
 ]
 test = [

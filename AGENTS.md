@@ -87,8 +87,8 @@ Optional extras:
 |-------|------|---------|
 | `forecast` | pandas, gluonts, statsmodels, matplotlib | Time series forecasting |
 | `shap` | shap>=0.42, shapiq>=1.0, matplotlib, numba | SHAP explainability |
-| `pretrain` | xgboost, wandb | Pre-training (v1) |
-| `finetune` | wandb | Single-dataset fine-tuning |
+| `pretrain` | transformers, xgboost, wandb | Pre-training (v1) |
+| `finetune` | transformers, wandb | Single-dataset fine-tuning |
 | `test` | pandas | Test suite |
 | `all` | all of the above | Everything |
 
@@ -229,14 +229,12 @@ SURVIVAL_QUERY_PINBALL_WEIGHT=0.0    # optional oracle-query pinball weight
 PRIOR_NUM_WORKERS=1                  # prefetch workers per DDP rank
 PRIOR_N_JOBS=1                       # within-batch generation threads per worker
 NPROC_PER_NODE=1                     # GPUs
-PYTHON_MODULE=python/3.11            # match the Python used to create the HPC venv
 WANDB_MODE=offline                   # online/offline/disabled
 ```
 
-Alliance Fir/Nibi two-H100 Stage 1 test and formal launcher:
+Nibi two-H100 Stage 1 test and formal launcher:
 ```bash
 sbatch scripts/train_survival_stage1_nibi.sh
-sbatch --time=00:10:00 --export=ALL,PREFLIGHT_ONLY=1 scripts/train_survival_stage1_nibi.sh
 sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal scripts/train_survival_stage1_nibi.sh
 ```
 The safe default is an isolated 50-step test. It preserves the formal
@@ -245,18 +243,9 @@ warmup and are not a convergence test. Formal mode runs completed
 500-step chunks, preserves the 100,000-step cosine schedule, and resubmits
 itself only after verifying the expected checkpoint. Stage 1 currently uses
 true float32 training with AMP disabled; float32 attention does not silently
-downcast through FlashAttention-3. The Fir/Nibi launcher uses one background prior
+downcast through FlashAttention-3. The Nibi launcher uses one background prior
 worker with three within-batch generation threads per rank, targeting its eight
 allocated CPU cores without multiplying full-batch prefetch memory.
-The launcher performs a real CUDA allocation before starting `torchrun`; an
-NVML-only device count is insufficient because Fir can list GPUs even when an
-incompatible PyTorch CUDA runtime cannot initialize them. It also runs a
-two-rank NCCL all-reduce preflight. GPU commands run inside an explicit
-single-task `srun` step that inherits both GPUs from the batch allocation. Do
-not add a step-level `--gpus-per-task` option on Fir; its Slurm configuration
-rejects that GRES specification. If driver-level `cuInit` still returns
-`CUDA_ERROR_NO_DEVICE`, rebuilding the Python environment cannot fix it; send
-the job ID and preflight log to Alliance support.
 
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.

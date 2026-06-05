@@ -42,7 +42,7 @@
 #   Stage 3: constant 2e-6
 #
 # Pre-requisites:
-#   pip install -e '.[pretrain]'
+#   pip install tabicl transformers wandb
 #   export NCCL_DEBUG=WARN   (for multi-GPU DDP)
 # ---------------------------------------------------------------------------
 

@@ -211,14 +211,13 @@ class Trainer:
         self.ddp = int(os.environ.get("RANK", -1)) != -1
 
         if self.ddp:
+            init_process_group(backend="nccl")
             self.ddp_rank = int(os.environ["RANK"])
             self.ddp_local_rank = int(os.environ["LOCAL_RANK"])
             self.ddp_world_size = int(os.environ["WORLD_SIZE"])
             self.master_process = self.ddp_rank == 0
             self.config.device = f"cuda:{self.ddp_local_rank}"
             torch.cuda.set_device(self.config.device)
-            self.cuda_enabled = True
-            init_process_group(backend="nccl")
 
             original_batch_size = self.config.batch_size
             self.config.batch_size = math.ceil(original_batch_size / self.ddp_world_size)
@@ -239,9 +238,6 @@ class Trainer:
             self.ddp_rank = 0
             self.ddp_world_size = 1
             self.ddp_local_rank = 0
-            self.cuda_enabled = str(self.config.device).startswith("cuda")
-            if self.cuda_enabled:
-                torch.cuda.set_device(self.config.device)
             print("No DDP training")
 
         self.curr_step = 0
@@ -249,7 +245,7 @@ class Trainer:
         seed_offset = self.ddp_rank if self.ddp else 0
         np.random.seed(self.config.np_seed + seed_offset)
         torch.manual_seed(self.config.torch_seed + seed_offset)
-        if self.cuda_enabled:
+        if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
@@ -745,6 +741,7 @@ class Trainer:
 
     def configure_amp(self):
         """Configure automatic mixed precision (AMP) for training."""
+        _cuda_available = torch.cuda.is_available()
         amp_dtype = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
@@ -752,10 +749,11 @@ class Trainer:
         }[self.config.dtype]
         self.amp = (
             self.config.amp
-            and self.cuda_enabled
+            and "cuda" in self.config.device
+            and _cuda_available
             and amp_dtype != torch.float32
         )
-        if self.cuda_enabled:
+        if _cuda_available:
             self.scaler = torch.GradScaler(
                 "cuda",
                 enabled=self.amp and amp_dtype == torch.float16,
@@ -1055,7 +1053,7 @@ class Trainer:
                     results = self.run_batch(batch)
                 train_time = train_timer.elapsed
 
-                if self.cuda_enabled:
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
                 self.curr_step = step + 1
@@ -1379,7 +1377,7 @@ class Trainer:
             except _OOMError:
                 print(f"Warning: OOM error in micro-batch {idx+1}/{num_micro_batches} "
                       f"at step {self.curr_step}. Skipping.")
-                if self.cuda_enabled:
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 failed_batches += 1
                 continue
