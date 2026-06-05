@@ -107,6 +107,12 @@ if [[ ! "$GPU_COUNT" =~ ^[0-9]+$ ]] || (( GPU_COUNT != 2 )); then
     exit 2
 fi
 CPU_COUNT="${SLURM_CPUS_PER_TASK:-8}"
+SRUN_ARGS=(
+    --ntasks=1
+    --cpus-per-task="$CPU_COUNT"
+    --gpus-per-task="$GPU_COUNT"
+    --kill-on-bad-exit=1
+)
 
 export CURRICULUM_ID
 export RUN_MODE
@@ -230,8 +236,9 @@ if [[ "$RUN_MODE" == "test" ]]; then
 fi
 echo "============================================"
 
-nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
-python -c "
+srun "${SRUN_ARGS[@]}" nvidia-smi \
+    --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+srun "${SRUN_ARGS[@]}" python -c "
 import hashlib
 import importlib.util
 import sys
@@ -260,14 +267,13 @@ if not wandb_installed and '${WANDB_MODE}' != 'disabled':
     print(\"WARNING: wandb is not installed; training metrics will not be logged.\", file=sys.stderr)
 "
 
-if ! python scripts/check_cuda_runtime.py --expected-gpus "$GPU_COUNT"; then
+if ! srun "${SRUN_ARGS[@]}" python scripts/check_cuda_runtime.py --expected-gpus "$GPU_COUNT"; then
     echo "ERROR: CUDA execution failed although nvidia-smi listed the allocated GPUs." >&2
-    echo "       On Fir, install PyTorch's CUDA 12.6 build. If that also fails," >&2
-    echo "       send this job log to Alliance support; the cuInit error identifies" >&2
-    echo "       a node driver or Fabric Manager problem." >&2
+    echo "       Driver-level cuInit runs below PyTorch, so rebuilding the venv will" >&2
+    echo "       not fix CUDA_ERROR_NO_DEVICE. Send this job log to Alliance support." >&2
     exit 1
 fi
-if ! torchrun --standalone --nproc_per_node="$GPU_COUNT" \
+if ! srun "${SRUN_ARGS[@]}" torchrun --standalone --nproc_per_node="$GPU_COUNT" \
     scripts/check_cuda_runtime.py --expected-gpus "$GPU_COUNT" --distributed; then
     echo "ERROR: The single-node NCCL preflight failed; training was not started." >&2
     exit 1
@@ -282,7 +288,7 @@ NPROC_PER_NODE="$GPU_COUNT" \
 RUN_STAGES=1 \
 STAGE1_SCHEDULER_STEPS="$STAGE1_SCHEDULER_STEPS" \
 STAGE1_STEPS="$NEXT_STEP" \
-bash scripts/train_survival_curriculum.sh
+srun "${SRUN_ARGS[@]}" bash scripts/train_survival_curriculum.sh
 
 EXPECTED_CHECKPOINT="${STAGE1_DIR}/step-${NEXT_STEP}.ckpt"
 if [[ ! -f "$EXPECTED_CHECKPOINT" ]]; then

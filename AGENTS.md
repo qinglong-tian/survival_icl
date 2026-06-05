@@ -251,11 +251,11 @@ allocated CPU cores without multiplying full-batch prefetch memory.
 The launcher performs a real CUDA allocation before starting `torchrun`; an
 NVML-only device count is insufficient because Fir can list GPUs even when an
 incompatible PyTorch CUDA runtime cannot initialize them. It also runs a
-two-rank NCCL all-reduce preflight. Use the PyTorch CUDA 12.6 build on Fir:
-```bash
-python -m pip install --force-reinstall torch==2.10.0 \
-    --index-url https://download.pytorch.org/whl/cu126
-```
+two-rank NCCL all-reduce preflight. GPU commands run inside an explicit
+single-task `srun` step so Fir grants the task access to both allocated GPUs.
+If driver-level `cuInit` still returns `CUDA_ERROR_NO_DEVICE`, rebuilding the
+Python environment cannot fix it; send the job ID and preflight log to Alliance
+support.
 
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.
