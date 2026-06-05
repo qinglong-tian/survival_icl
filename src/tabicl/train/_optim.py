@@ -2,18 +2,78 @@
 
 from __future__ import annotations
 
-from transformers import (
-    get_constant_schedule,
-    get_linear_schedule_with_warmup,
-    get_cosine_schedule_with_warmup,
-    get_polynomial_decay_schedule_with_warmup,
-)
-
-
 import math
 from functools import partial
+
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
+
+
+def _get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):
+    return LambdaLR(optimizer, lambda _: 1.0, last_epoch)
+
+
+def _get_linear_schedule_with_warmup(
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    last_epoch: int = -1,
+):
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(
+            0.0,
+            float(num_training_steps - current_step)
+            / float(max(1, num_training_steps - num_warmup_steps)),
+        )
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def _get_cosine_schedule_with_warmup(
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: float = 0.5,
+    last_epoch: int = -1,
+):
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * 2.0 * num_cycles * progress)))
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def _get_polynomial_decay_schedule_with_warmup(
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    lr_end: float = 1e-7,
+    power: float = 1.0,
+    last_epoch: int = -1,
+):
+    lr_init = optimizer.defaults["lr"]
+    if lr_init <= lr_end:
+        raise ValueError(f"lr_end ({lr_end}) must be smaller than initial lr ({lr_init})")
+
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        if current_step > num_training_steps:
+            return lr_end / lr_init
+
+        lr_range = lr_init - lr_end
+        decay_steps = num_training_steps - num_warmup_steps
+        pct_remaining = 1 - (current_step - num_warmup_steps) / decay_steps
+        decay = lr_range * pct_remaining**power + lr_end
+        return decay / lr_init
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 def _get_cosine_with_restarts_lr_lambda(
@@ -121,13 +181,13 @@ def get_scheduler(config, optimizer):
         warmup_steps = config.warmup_steps
 
     if config.scheduler == "constant":
-        scheduler = get_constant_schedule(optimizer=optimizer)
+        scheduler = _get_constant_schedule(optimizer=optimizer)
     elif config.scheduler == "linear_warmup":
-        scheduler = get_linear_schedule_with_warmup(
+        scheduler = _get_linear_schedule_with_warmup(
             optimizer=optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
         )
     elif config.scheduler == "cosine_warmup":
-        scheduler = get_cosine_schedule_with_warmup(
+        scheduler = _get_cosine_schedule_with_warmup(
             optimizer=optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
         )
     elif config.scheduler == "cosine_with_restarts":
@@ -140,7 +200,7 @@ def get_scheduler(config, optimizer):
             lr_end=config.cosine_lr_end,
         )
     elif config.scheduler == "polynomial_decay_warmup":
-        scheduler = get_polynomial_decay_schedule_with_warmup(
+        scheduler = _get_polynomial_decay_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=warmup_steps,
             num_training_steps=total_steps,

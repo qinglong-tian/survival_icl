@@ -12,7 +12,7 @@
 #SBATCH --mail-user=qltian2021@gmail.com
 #SBATCH --mail-type=FAIL,TIME_LIMIT
 
-# Nibi two-H100 launcher for the canonical survival Stage 1 curriculum.
+# Alliance Fir/Nibi two-H100 launcher for the canonical survival Stage 1 curriculum.
 #
 # Safe default: an isolated 50-step test with no resubmission.
 #   sbatch scripts/train_survival_stage1_nibi.sh
@@ -36,6 +36,7 @@ SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
 PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
 PRIOR_N_JOBS="${PRIOR_N_JOBS:-3}"
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
 VENV_PATH="${VENV_PATH:-${HOME}/venvs/icl/bin/activate}"
 
 case "$RUN_MODE" in
@@ -113,6 +114,7 @@ export SURVIVAL_QUERY_PINBALL_QUANTILES
 export SURVIVAL_QUERY_PINBALL_WEIGHT
 export PRIOR_NUM_WORKERS
 export PRIOR_N_JOBS
+export PYTHON_MODULE
 export VENV_PATH
 export WANDB_MODE
 
@@ -136,13 +138,18 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export TORCH_NCCL_ASYNC_HANDLING=1
 
 module --force purge
-module load StdEnv/2023 python/3.10.13
+module load StdEnv/2023 "$PYTHON_MODULE"
 
 if [[ ! -f "$VENV_PATH" ]]; then
     echo "ERROR: Python environment activation script not found: ${VENV_PATH}" >&2
     exit 2
 fi
 source "$VENV_PATH"
+ACTIVE_PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if [[ "$PYTHON_MODULE" != *"${ACTIVE_PYTHON_VERSION}"* ]]; then
+    echo "WARNING: ${PYTHON_MODULE} loaded, but the venv uses Python ${ACTIVE_PYTHON_VERSION}." >&2
+    echo "         Set PYTHON_MODULE to the module used when this venv was created." >&2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 THIS_SCRIPT="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
@@ -163,7 +170,7 @@ fi
 export REPO_DIR
 
 cd "$REPO_DIR"
-pip install -e . --quiet 2>&1 | tail -2
+python -m pip install -e . --quiet 2>&1 | tail -2
 
 WANDB_DIR="${WANDB_DIR:-${SURVIVAL_CHECKPOINT_DIR}/wandb}"
 STAGE1_DIR="${SURVIVAL_CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage1"
@@ -194,7 +201,7 @@ if (( NEXT_STEP > STAGE1_TARGET_STEPS )); then
 fi
 
 echo "============================================"
-echo "Nibi Survival Stage 1"
+echo "Alliance Fir/Nibi Survival Stage 1"
 echo "Mode:             ${RUN_MODE}"
 echo "Job ID:           ${JOB_ID}"
 echo "Node:             $(hostname)"
@@ -219,11 +226,15 @@ echo "============================================"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 python -c "
 import hashlib
+import importlib.util
+import sys
 from pathlib import Path
 
 import torch
 from tabicl._model.attention import HAS_FLASH_ATTN3
+from tabicl.train._optim import get_scheduler
 
+wandb_installed = importlib.util.find_spec('wandb') is not None
 paths = [Path('survival_prior.py')]
 paths += sorted(Path('src').rglob('*.py'))
 paths += sorted(Path('scripts').rglob('*.sh'))
@@ -232,9 +243,14 @@ for path in paths:
     digest.update(str(path).encode())
     digest.update(path.read_bytes())
 
+print(f'Python: {sys.executable}')
 print(f'PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}')
 print(f'FlashAttention-3 installed: {HAS_FLASH_ATTN3}; float32 training uses PyTorch SDPA')
+print(f'Scheduler dependency preflight: OK')
+print(f'WandB installed: {wandb_installed}; mode: ${WANDB_MODE}')
 print(f'Source fingerprint: {digest.hexdigest()[:16]}')
+if not wandb_installed and '${WANDB_MODE}' != 'disabled':
+    print(\"WARNING: wandb is not installed; training metrics will not be logged.\", file=sys.stderr)
 "
 
 CHECKPOINT_DIR="$SURVIVAL_CHECKPOINT_DIR" \
