@@ -36,6 +36,7 @@ SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
 PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
 PRIOR_N_JOBS="${PRIOR_N_JOBS:-3}"
+PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
 VENV_PATH="${VENV_PATH:-${HOME}/venvs/icl/bin/activate}"
 
@@ -84,6 +85,10 @@ if [[ ! "$PRIOR_N_JOBS" =~ ^[0-9]+$ ]] || (( 10#${PRIOR_N_JOBS} < 1 )); then
     exit 2
 fi
 PRIOR_N_JOBS=$((10#${PRIOR_N_JOBS}))
+if [[ "$PREFLIGHT_ONLY" != "0" && "$PREFLIGHT_ONLY" != "1" ]]; then
+    echo "ERROR: PREFLIGHT_ONLY must be 0 or 1 (got '${PREFLIGHT_ONLY}')." >&2
+    exit 2
+fi
 
 if (( STAGE1_CHUNK_STEPS > STAGE1_TARGET_STEPS )); then
     echo "ERROR: STAGE1_CHUNK_STEPS cannot exceed STAGE1_TARGET_STEPS." >&2
@@ -114,6 +119,7 @@ export SURVIVAL_QUERY_PINBALL_QUANTILES
 export SURVIVAL_QUERY_PINBALL_WEIGHT
 export PRIOR_NUM_WORKERS
 export PRIOR_N_JOBS
+export PREFLIGHT_ONLY
 export PYTHON_MODULE
 export VENV_PATH
 export WANDB_MODE
@@ -218,12 +224,13 @@ echo "Next step:        ${NEXT_STEP}"
 echo "Scheduler horizon:${STAGE1_SCHEDULER_STEPS}"
 echo "Checkpoint dir:   ${STAGE1_DIR}"
 echo "WandB mode:       ${WANDB_MODE}"
+echo "Preflight only:   ${PREFLIGHT_ONLY}"
 if [[ "$RUN_MODE" == "test" ]]; then
     echo "LR interpretation: this test remains inside the $((STAGE1_SCHEDULER_STEPS * 2 / 100))-step warmup."
 fi
 echo "============================================"
 
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 python -c "
 import hashlib
 import importlib.util
@@ -244,7 +251,7 @@ for path in paths:
     digest.update(path.read_bytes())
 
 print(f'Python: {sys.executable}')
-print(f'PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}')
+print(f'PyTorch {torch.__version__}; CUDA runtime {torch.version.cuda}')
 print(f'FlashAttention-3 installed: {HAS_FLASH_ATTN3}; float32 training uses PyTorch SDPA')
 print(f'Scheduler dependency preflight: OK')
 print(f'WandB installed: {wandb_installed}; mode: ${WANDB_MODE}')
@@ -252,6 +259,23 @@ print(f'Source fingerprint: {digest.hexdigest()[:16]}')
 if not wandb_installed and '${WANDB_MODE}' != 'disabled':
     print(\"WARNING: wandb is not installed; training metrics will not be logged.\", file=sys.stderr)
 "
+
+if ! python scripts/check_cuda_runtime.py --expected-gpus "$GPU_COUNT"; then
+    echo "ERROR: CUDA execution failed although nvidia-smi listed the allocated GPUs." >&2
+    echo "       On Fir, install PyTorch's CUDA 12.6 build. If that also fails," >&2
+    echo "       send this job log to Alliance support; the cuInit error identifies" >&2
+    echo "       a node driver or Fabric Manager problem." >&2
+    exit 1
+fi
+if ! torchrun --standalone --nproc_per_node="$GPU_COUNT" \
+    scripts/check_cuda_runtime.py --expected-gpus "$GPU_COUNT" --distributed; then
+    echo "ERROR: The single-node NCCL preflight failed; training was not started." >&2
+    exit 1
+fi
+if (( PREFLIGHT_ONLY )); then
+    echo "CUDA and NCCL preflight complete. Training was not started."
+    exit 0
+fi
 
 CHECKPOINT_DIR="$SURVIVAL_CHECKPOINT_DIR" \
 NPROC_PER_NODE="$GPU_COUNT" \

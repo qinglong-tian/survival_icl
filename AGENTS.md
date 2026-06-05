@@ -236,6 +236,7 @@ WANDB_MODE=offline                   # online/offline/disabled
 Alliance Fir/Nibi two-H100 Stage 1 test and formal launcher:
 ```bash
 sbatch scripts/train_survival_stage1_nibi.sh
+sbatch --time=00:10:00 --export=ALL,PREFLIGHT_ONLY=1 scripts/train_survival_stage1_nibi.sh
 sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal scripts/train_survival_stage1_nibi.sh
 ```
 The safe default is an isolated 50-step test. It preserves the formal
@@ -247,6 +248,14 @@ true float32 training with AMP disabled; float32 attention does not silently
 downcast through FlashAttention-3. The Fir/Nibi launcher uses one background prior
 worker with three within-batch generation threads per rank, targeting its eight
 allocated CPU cores without multiplying full-batch prefetch memory.
+The launcher performs a real CUDA allocation before starting `torchrun`; an
+NVML-only device count is insufficient because Fir can list GPUs even when an
+incompatible PyTorch CUDA runtime cannot initialize them. It also runs a
+two-rank NCCL all-reduce preflight. Use the PyTorch CUDA 12.6 build on Fir:
+```bash
+python -m pip install --force-reinstall torch==2.10.0 \
+    --index-url https://download.pytorch.org/whl/cu126
+```
 
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.
