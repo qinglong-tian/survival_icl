@@ -226,6 +226,8 @@ CURRICULUM_ID=author_adapted_v1      # checkpoint namespace
 STAGE1_STEPS=100000                  # override per-stage step count
 STAGE1_SCHEDULER_STEPS=100000        # fixed LR horizon for chunked Stage 1
 SURVIVAL_QUERY_PINBALL_WEIGHT=0.0    # optional oracle-query pinball weight
+PRIOR_NUM_WORKERS=1                  # prefetch workers per DDP rank
+PRIOR_N_JOBS=1                       # within-batch generation threads per worker
 NPROC_PER_NODE=1                     # GPUs
 WANDB_MODE=offline                   # online/offline/disabled
 ```
@@ -235,11 +237,15 @@ Nibi two-H100 Stage 1 test and formal launcher:
 sbatch scripts/train_survival_stage1_nibi.sh
 sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal scripts/train_survival_stage1_nibi.sh
 ```
-The safe default is an isolated 50-step test. Formal mode runs completed
-1,000-step chunks, preserves the 100,000-step cosine schedule, and resubmits
+The safe default is an isolated 50-step test. It preserves the formal
+100,000-step scheduler horizon, so all 50 steps remain inside the 2,000-step
+warmup and are not a convergence test. Formal mode runs completed
+500-step chunks, preserves the 100,000-step cosine schedule, and resubmits
 itself only after verifying the expected checkpoint. Stage 1 currently uses
 true float32 training with AMP disabled; float32 attention does not silently
-downcast through FlashAttention-3.
+downcast through FlashAttention-3. The Nibi launcher uses one background prior
+worker with three within-batch generation threads per rank, targeting its eight
+allocated CPU cores without multiplying full-batch prefetch memory.
 
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.

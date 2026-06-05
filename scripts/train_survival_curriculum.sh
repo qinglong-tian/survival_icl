@@ -22,6 +22,8 @@
 #                      — optional oracle-query pinball weight (default: 0.0)
 #   SURVIVAL_QUERY_PINBALL_QUANTILES
 #                      — comma-separated pinball quantiles
+#   PRIOR_NUM_WORKERS  — DataLoader prior workers per DDP rank (default: 1)
+#   PRIOR_N_JOBS       — generation threads within each prior worker (default: 1)
 #
 #   STAGE*_STEPS overrides must be divisible by the stage's effective
 #   checkpoint interval (gcd of save_temp_every=50 and the stage's
@@ -59,11 +61,23 @@ STAGE2_STEPS="${STAGE2_STEPS:-2000}"
 STAGE3_STEPS="${STAGE3_STEPS:-50}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
+PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
+PRIOR_N_JOBS="${PRIOR_N_JOBS:-1}"
 
 if [[ ! "$CURRICULUM_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: CURRICULUM_ID must contain only letters, numbers, '.', '_', or '-'" >&2
     exit 1
 fi
+if [[ ! "$PRIOR_NUM_WORKERS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: PRIOR_NUM_WORKERS must be a non-negative integer (got '${PRIOR_NUM_WORKERS}')." >&2
+    exit 1
+fi
+PRIOR_NUM_WORKERS=$((10#${PRIOR_NUM_WORKERS}))
+if [[ ! "$PRIOR_N_JOBS" =~ ^[0-9]+$ ]] || (( 10#${PRIOR_N_JOBS} < 1 )); then
+    echo "ERROR: PRIOR_N_JOBS must be a positive integer (got '${PRIOR_N_JOBS}')." >&2
+    exit 1
+fi
+PRIOR_N_JOBS=$((10#${PRIOR_N_JOBS}))
 
 STAGE1_DIR="${CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage1"
 STAGE2_DIR="${CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage2"
@@ -213,6 +227,8 @@ read -r -d '' SURVIVAL_FLAGS <<EOF || true
 --censor_calibration_scope context
 --survival_query_pinball_weight ${SURVIVAL_QUERY_PINBALL_WEIGHT}
 --survival_query_pinball_quantiles ${SURVIVAL_QUERY_PINBALL_QUANTILES}
+--prior_num_workers ${PRIOR_NUM_WORKERS}
+--prior_n_jobs ${PRIOR_N_JOBS}
 EOF
 
 # ── Shared model architecture ───────────────────────────────────────────

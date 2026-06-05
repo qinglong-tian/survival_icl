@@ -971,6 +971,11 @@ class SurvivalSCMPrior(SCMPrior):
                     f"AFT: {list(self.aft_baseline_pool.keys())}"
                 )
 
+    def reseed_worker(self, seed: int) -> None:
+        """Give each persistent DataLoader worker an independent survival RNG."""
+        self._rng_entropy = int(seed)
+        self._survival_rng = np.random.default_rng(self._rng_entropy)
+
     def _setup_ph_baselines(self):
         broad = (self.baseline_param_prior == "broad")
         self.ph_baseline_pool: Dict[str, BaselineHazard] = {}

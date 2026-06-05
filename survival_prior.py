@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, Union, Tuple, List
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 
 from tabicl.prior._dataset import DummyPrior, Prior, DisablePrinting
 from tabicl.prior._genload import (
@@ -302,6 +302,7 @@ class SurvivalPriorDataset(IterableDataset):
         self.max_train_size = max_train_size
         self.device = device
         self.prior_type = prior_type
+        self.n_jobs = n_jobs
 
     def get_batch(
         self, batch_size: Optional[int] = None
@@ -309,6 +310,14 @@ class SurvivalPriorDataset(IterableDataset):
         return self.prior.get_batch(batch_size)
 
     def __iter__(self):
+        worker_info = get_worker_info()
+        if (
+            worker_info is not None
+            and getattr(self, "_worker_seed", None) != worker_info.seed
+            and hasattr(self.prior, "reseed_worker")
+        ):
+            self.prior.reseed_worker(worker_info.seed)
+            self._worker_seed = worker_info.seed
         return self
 
     def __next__(self):
@@ -319,6 +328,7 @@ class SurvivalPriorDataset(IterableDataset):
         return (
             f"SurvivalPriorDataset(\n"
             f"  prior_type: {self.prior_type}\n"
+            f"  generation jobs: {self.n_jobs}\n"
             f"  batch_size: {self.batch_size}\n"
             f"  batch_size_per_gp: {self.batch_size_per_gp}\n"
             f"  features: {self.min_features} - {self.max_features}\n"

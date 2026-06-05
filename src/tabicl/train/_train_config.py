@@ -173,6 +173,12 @@ def build_parser():
         default=1,
         help="DataLoader workers for prior prefetching. Set to 0 for synchronous (macOS safe).",
     )
+    parser.add_argument(
+        "--prior_n_jobs",
+        type=int,
+        default=1,
+        help="Joblib threads used to generate independent datasets within each prior batch.",
+    )
 
     ###########################################################################
     ##### Model Architecture Config ###########################################

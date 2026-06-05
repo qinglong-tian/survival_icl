@@ -590,6 +590,10 @@ class Trainer:
     def configure_prior(self):
         """Set up a tabular dataset generator for synthetic data during training."""
 
+        prior_n_jobs = getattr(self.config, "prior_n_jobs", 1)
+        if prior_n_jobs < 1:
+            raise ValueError(f"prior_n_jobs must be at least 1, got {prior_n_jobs}.")
+
         if self.survival:
             from survival_prior import SurvivalPriorDataset, LoadSurvivalPriorDataset
 
@@ -626,7 +630,7 @@ class Trainer:
                     censoring_strategy=getattr(self.config, "censoring_strategy", "target_event_rate"),
                     calibration_scope=getattr(self.config, "censor_calibration_scope", "dataset"),
                     device=self.config.prior_device,
-                    n_jobs=1,
+                    n_jobs=prior_n_jobs,
                 )
             else:
                 dataset = LoadSurvivalPriorDataset(
@@ -656,7 +660,7 @@ class Trainer:
                     replay_small=self.config.replay_small,
                     prior_type=self.config.prior_type,
                     device=self.config.prior_device,
-                    n_jobs=1,
+                    n_jobs=prior_n_jobs,
                 )
             else:
                 dataset = LoadPriorDataset(
@@ -677,6 +681,11 @@ class Trainer:
         # with no inherited CUDA context and only run CPU-side SCM → survival sampling.
         # macOS users should set --prior_num_workers 0 if spawn pickling is problematic.
         prior_workers = getattr(self.config, "prior_num_workers", 1)
+        if prior_workers < 0:
+            raise ValueError(f"prior_num_workers must be non-negative, got {prior_workers}.")
+        if self.master_process:
+            print(f"Prior DataLoader workers per rank: {prior_workers}")
+            print(f"Prior generation jobs per worker: {prior_n_jobs}")
         self.dataloader = DataLoader(
             dataset,
             batch_size=None,
@@ -1039,6 +1048,7 @@ class Trainer:
                     batch = next(dataloader)
                 prior_time = prior_timer.elapsed
 
+                step_lr = self.optimizer.param_groups[0]["lr"]
                 with Timer() as train_timer:
                     results = self.run_batch(batch)
                 train_time = train_timer.elapsed
@@ -1048,8 +1058,13 @@ class Trainer:
 
                 self.curr_step = step + 1
                 if self.master_process:
-                    results.update({"prior_time": prior_time, "train_time": train_time})
-                    step_progress.set_postfix(**{k: round(v, 3) if isinstance(v, float) else v for k, v in results.items()})
+                    results.update({"lr": step_lr, "prior_time": prior_time, "train_time": train_time})
+                    display_results = {
+                        k: round(v, 3) if isinstance(v, float) else v
+                        for k, v in results.items()
+                    }
+                    display_results["lr"] = f"{step_lr:.3e}"
+                    step_progress.set_postfix(**display_results)
 
                     if self.curr_step % self.config.save_temp_every == 0 or self.curr_step % self.config.save_perm_every == 0:
                         ckpt_name = f"step-{self.curr_step}.ckpt"
@@ -1060,7 +1075,6 @@ class Trainer:
                             self.manage_checkpoint()
 
                 if self.wandb_run is not None:
-                    results["lr"] = self.scheduler.get_last_lr()[0]
                     wandb.log(results, step=self.curr_step)
         except StopIteration:
             if self.master_process:
@@ -1282,17 +1296,6 @@ class Trainer:
                         tau_levels=tau,
                     )
                     loss = surv_nll + self.query_pinball_weight * pinball
-
-                # Log underflow/overflow counts
-                if valid_mask_flat.any():
-                    v = valid_mask_flat
-                    ir = t_event_in_range_flat
-                    n_valid = v.sum().item()
-                    n_in_range = (v & ir).sum().item()
-                    n_underflow = (t_test_flat[v] < self.binner.bin_edges[0]).sum().item()
-                    n_overflow = (t_test_flat[v] > self.binner.bin_edges[-1]).sum().item()
-                else:
-                    n_valid = n_in_range = n_underflow = n_overflow = 0.0
             else:
                 # Observed mode (legacy): censored query NLL
                 t_test_flat = t_test.reshape(-1)
@@ -1316,14 +1319,9 @@ class Trainer:
                 "_nonfinite_loss_count": float(not math.isfinite(loss_value)),
                 "_nonfinite_logit_count": nonfinite_logit_count,
             }
-            if event_mode:
-                micro_results["query_n_valid"] = n_valid
-                micro_results["query_n_underflow"] = n_underflow
-                micro_results["query_n_overflow"] = n_overflow
-                micro_results["query_n_in_range"] = n_in_range
-                if pinball is not None:
-                    micro_results["query_pinball"] = pinball.item() / num_micro_batches
-                    micro_results["total_loss"] = loss.item() / num_micro_batches
+            if event_mode and pinball is not None:
+                micro_results["query_pinball"] = pinball.item() / num_micro_batches
+                micro_results["total_loss"] = loss.item() / num_micro_batches
 
         return micro_results
 
@@ -1364,14 +1362,9 @@ class Trainer:
                 "_nonfinite_loss_count": 0.0,
                 "_nonfinite_logit_count": 0.0,
             }
-            if self.query_supervision == "event":
-                results["query_n_valid"] = 0.0
-                results["query_n_underflow"] = 0.0
-                results["query_n_overflow"] = 0.0
-                results["query_n_in_range"] = 0.0
-                if self.query_pinball_weight > 0.0:
-                    results["query_pinball"] = 0.0
-                    results["total_loss"] = 0.0
+            if self.query_supervision == "event" and self.query_pinball_weight > 0.0:
+                results["query_pinball"] = 0.0
+                results["total_loss"] = 0.0
         else:
             results = {"ce": 0.0, "accuracy": 0.0}
         failed_batches = 0
@@ -1416,27 +1409,14 @@ class Trainer:
                     "The optimizer step was aborted."
                 )
 
-        if self.survival and self.query_supervision == "event":
-            n_valid = results.pop("query_n_valid")
-            if n_valid > 0:
-                results["query_event_underflow_rate"] = results.pop("query_n_underflow") / n_valid
-                results["query_event_overflow_rate"] = results.pop("query_n_overflow") / n_valid
-                results["query_event_in_range"] = results.pop("query_n_in_range") / n_valid
-            else:
-                results.pop("query_n_underflow")
-                results.pop("query_n_overflow")
-                results.pop("query_n_in_range")
-                results["query_event_underflow_rate"] = 0.0
-                results["query_event_overflow_rate"] = 0.0
-                results["query_event_in_range"] = 0.0
-
         if self.config.gradient_clipping > 0:
             self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(
+            grad_norm = nn.utils.clip_grad_norm_(
                 self.model.parameters(),
                 self.config.gradient_clipping,
                 error_if_nonfinite=True,
             )
+            results["grad_norm"] = grad_norm.item()
 
         self.scaler.step(self.optimizer)
         self.scaler.update()

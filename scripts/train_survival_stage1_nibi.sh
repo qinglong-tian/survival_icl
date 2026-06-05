@@ -17,7 +17,7 @@
 # Safe default: an isolated 50-step test with no resubmission.
 #   sbatch scripts/train_survival_stage1_nibi.sh
 #
-# Formal run: 100,000 steps in completed 1,000-step chunks. Each successful
+# Formal run: 100,000 steps in completed 500-step chunks. Each successful
 # chunk resubmits this script and resumes model, optimizer, and scheduler state.
 #   sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal \
 #       scripts/train_survival_stage1_nibi.sh
@@ -34,6 +34,8 @@ STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
+PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
+PRIOR_N_JOBS="${PRIOR_N_JOBS:-3}"
 VENV_PATH="${VENV_PATH:-${HOME}/venvs/icl/bin/activate}"
 
 case "$RUN_MODE" in
@@ -46,7 +48,7 @@ case "$RUN_MODE" in
         ;;
     formal)
         STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
-        STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-1000}"
+        STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-500}"
         CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
         SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-icl}"
         AUTO_RESUBMIT=1
@@ -70,6 +72,17 @@ for name in STAGE1_TARGET_STEPS STAGE1_CHUNK_STEPS STAGE1_SCHEDULER_STEPS; do
         exit 2
     fi
 done
+
+if [[ ! "$PRIOR_NUM_WORKERS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: PRIOR_NUM_WORKERS must be a non-negative integer (got '${PRIOR_NUM_WORKERS}')." >&2
+    exit 2
+fi
+PRIOR_NUM_WORKERS=$((10#${PRIOR_NUM_WORKERS}))
+if [[ ! "$PRIOR_N_JOBS" =~ ^[0-9]+$ ]] || (( 10#${PRIOR_N_JOBS} < 1 )); then
+    echo "ERROR: PRIOR_N_JOBS must be a positive integer (got '${PRIOR_N_JOBS}')." >&2
+    exit 2
+fi
+PRIOR_N_JOBS=$((10#${PRIOR_N_JOBS}))
 
 if (( STAGE1_CHUNK_STEPS > STAGE1_TARGET_STEPS )); then
     echo "ERROR: STAGE1_CHUNK_STEPS cannot exceed STAGE1_TARGET_STEPS." >&2
@@ -98,11 +111,25 @@ export STAGE1_TARGET_STEPS
 export SURVIVAL_CHECKPOINT_DIR
 export SURVIVAL_QUERY_PINBALL_QUANTILES
 export SURVIVAL_QUERY_PINBALL_WEIGHT
+export PRIOR_NUM_WORKERS
+export PRIOR_N_JOBS
 export VENV_PATH
 export WANDB_MODE
 
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
-export OMP_NUM_THREADS=$((CPU_COUNT / GPU_COUNT))
+# Each GPU has one training rank plus n_jobs active threads per prior worker.
+if (( PRIOR_NUM_WORKERS > 0 )); then
+    CPU_PROCESS_COUNT=$((GPU_COUNT * (1 + PRIOR_NUM_WORKERS * PRIOR_N_JOBS)))
+else
+    CPU_PROCESS_COUNT=$((GPU_COUNT * PRIOR_N_JOBS))
+fi
+if (( CPU_PROCESS_COUNT > CPU_COUNT )); then
+    echo "WARNING: Estimated active CPU threads (${CPU_PROCESS_COUNT}) exceed allocated cores (${CPU_COUNT})." >&2
+fi
+export OMP_NUM_THREADS=$((CPU_COUNT / CPU_PROCESS_COUNT))
+if (( OMP_NUM_THREADS < 1 )); then
+    export OMP_NUM_THREADS=1
+fi
 export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
@@ -173,6 +200,10 @@ echo "Job ID:           ${JOB_ID}"
 echo "Node:             $(hostname)"
 echo "GPUs:             ${GPU_COUNT}"
 echo "CPU cores:        ${CPU_COUNT}"
+echo "Prior workers:    ${PRIOR_NUM_WORKERS} per rank"
+echo "Generation jobs:  ${PRIOR_N_JOBS} per worker"
+echo "CPU thread demand:${CPU_PROCESS_COUNT} estimated"
+echo "OMP threads:      ${OMP_NUM_THREADS} per process"
 echo "Repository:       ${REPO_DIR}"
 echo "Git commit:       $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "Current step:     ${CURRENT_STEP}"
@@ -180,14 +211,30 @@ echo "Next step:        ${NEXT_STEP}"
 echo "Scheduler horizon:${STAGE1_SCHEDULER_STEPS}"
 echo "Checkpoint dir:   ${STAGE1_DIR}"
 echo "WandB mode:       ${WANDB_MODE}"
+if [[ "$RUN_MODE" == "test" ]]; then
+    echo "LR interpretation: this test remains inside the $((STAGE1_SCHEDULER_STEPS * 2 / 100))-step warmup."
+fi
 echo "============================================"
 
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 python -c "
+import hashlib
+from pathlib import Path
+
 import torch
 from tabicl._model.attention import HAS_FLASH_ATTN3
+
+paths = [Path('survival_prior.py')]
+paths += sorted(Path('src').rglob('*.py'))
+paths += sorted(Path('scripts').rglob('*.sh'))
+digest = hashlib.sha256()
+for path in paths:
+    digest.update(str(path).encode())
+    digest.update(path.read_bytes())
+
 print(f'PyTorch {torch.__version__}; CUDA {torch.version.cuda}; GPUs {torch.cuda.device_count()}')
 print(f'FlashAttention-3 installed: {HAS_FLASH_ATTN3}; float32 training uses PyTorch SDPA')
+print(f'Source fingerprint: {digest.hexdigest()[:16]}')
 "
 
 CHECKPOINT_DIR="$SURVIVAL_CHECKPOINT_DIR" \
