@@ -17,8 +17,10 @@
 # Safe default: an isolated 50-step test with no resubmission.
 #   sbatch scripts/train_survival_stage1_nibi.sh
 #
-# Formal run: 100,000 steps in completed 500-step chunks. Each successful
+# Formal pilot: 5,000 steps in completed 500-step chunks. Each successful
 # chunk resubmits this script and resumes model, optimizer, and scheduler state.
+# The scheduler retains its 100,000-step horizon, and checkpoints
+# 0/500/1000/2000/5000 are preserved for evaluation.
 #   sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal \
 #       scripts/train_survival_stage1_nibi.sh
 #
@@ -36,6 +38,8 @@ SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
 PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
 PRIOR_N_JOBS="${PRIOR_N_JOBS:-3}"
+BASE_NP_SEED="${BASE_NP_SEED:-42}"
+BASE_TORCH_SEED="${BASE_TORCH_SEED:-42}"
 VENV_PATH="${VENV_PATH:-${HOME}/venvs/icl/bin/activate}"
 
 case "$RUN_MODE" in
@@ -48,7 +52,7 @@ case "$RUN_MODE" in
         AUTO_RESUBMIT=0
         ;;
     formal)
-        STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
+        STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-5000}"
         STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-500}"
         STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
         CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
@@ -73,6 +77,15 @@ for name in STAGE1_TARGET_STEPS STAGE1_CHUNK_STEPS STAGE1_SCHEDULER_STEPS; do
         echo "ERROR: ${name} must be a positive integer divisible by 50 (got '${value}')." >&2
         exit 2
     fi
+done
+
+for name in BASE_NP_SEED BASE_TORCH_SEED; do
+    value="${!name}"
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: ${name} must be a non-negative integer (got '${value}')." >&2
+        exit 2
+    fi
+    printf -v "$name" "%d" "$((10#${value}))"
 done
 
 if [[ ! "$PRIOR_NUM_WORKERS" =~ ^[0-9]+$ ]]; then
@@ -115,6 +128,8 @@ export SURVIVAL_QUERY_PINBALL_QUANTILES
 export SURVIVAL_QUERY_PINBALL_WEIGHT
 export PRIOR_NUM_WORKERS
 export PRIOR_N_JOBS
+export BASE_NP_SEED
+export BASE_TORCH_SEED
 export VENV_PATH
 export WANDB_MODE
 
@@ -190,6 +205,11 @@ if (( CURRENT_STEP == STAGE1_TARGET_STEPS )); then
     exit 0
 fi
 
+NP_SEED=$((BASE_NP_SEED + CURRENT_STEP))
+TORCH_SEED=$((BASE_TORCH_SEED + CURRENT_STEP))
+export NP_SEED
+export TORCH_SEED
+
 NEXT_STEP=$((CURRENT_STEP + STAGE1_CHUNK_STEPS))
 if (( NEXT_STEP > STAGE1_TARGET_STEPS )); then
     NEXT_STEP="$STAGE1_TARGET_STEPS"
@@ -211,6 +231,7 @@ echo "Git commit:       $(git rev-parse --short HEAD 2>/dev/null || echo unknown
 echo "Current step:     ${CURRENT_STEP}"
 echo "Next step:        ${NEXT_STEP}"
 echo "Scheduler horizon:${STAGE1_SCHEDULER_STEPS}"
+echo "Chunk seeds:      numpy=${NP_SEED}, torch=${TORCH_SEED}"
 echo "Checkpoint dir:   ${STAGE1_DIR}"
 echo "WandB mode:       ${WANDB_MODE}"
 if [[ "$RUN_MODE" == "test" ]]; then

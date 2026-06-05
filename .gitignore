@@ -4,6 +4,8 @@ __pycache__/
 data/
 test_survival_data/
 survival_data/
+survival_holdouts/
+survival_eval_results/
 *.tmp
 
 # HPC checkpoint and log directories

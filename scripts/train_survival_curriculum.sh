@@ -10,12 +10,12 @@
 #   WANDB_DIR          — wandb log directory (default: ./wandb)
 #   NPROC_PER_NODE     — GPUs per node (default: 1)
 #   WANDB_MODE         — wandb mode: online/offline/disabled (default: offline)
-#   RUN_STAGES         — which stages to run: 1,2,3 or 1,2 or 1 (default: 1,2,3)
+#   RUN_STAGES         — which stages to run: 1,2,3 or 1,2 or 1 (default: 1)
 #                        Token-validated; empty/invalid/duplicate rejected.
 #   CURRICULUM_ID      — checkpoint namespace (default: author_adapted_v1)
-#   STAGE1_STEPS       — override Stage 1 max steps (default: 100000)
+#   STAGE1_STEPS       — override Stage 1 max steps (default: 5000)
 #   STAGE1_SCHEDULER_STEPS
-#                      — Stage 1 LR horizon for chunked runs (default: STAGE1_STEPS)
+#                      — Stage 1 LR horizon for chunked runs (default: 100000)
 #   STAGE2_STEPS       — override Stage 2 max steps (default: 2000)
 #   STAGE3_STEPS       — override Stage 3 max steps (default: 50)
 #   SURVIVAL_QUERY_PINBALL_WEIGHT
@@ -24,6 +24,8 @@
 #                      — comma-separated pinball quantiles
 #   PRIOR_NUM_WORKERS  — DataLoader prior workers per DDP rank (default: 1)
 #   PRIOR_N_JOBS       — generation threads within each prior worker (default: 1)
+#   NP_SEED            — NumPy prior seed (default: 42)
+#   TORCH_SEED         — model/PyTorch seed (default: 42)
 #
 #   STAGE*_STEPS overrides must be divisible by the stage's effective
 #   checkpoint interval (gcd of save_temp_every=50 and the stage's
@@ -52,17 +54,19 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints}"
 WANDB_DIR="${WANDB_DIR:-./wandb}"
 NPROC="${NPROC_PER_NODE:-1}"
 WANDB_MODE="${WANDB_MODE:-offline}"
-RUN_STAGES="${RUN_STAGES-1,2,3}"
+RUN_STAGES="${RUN_STAGES-1}"
 CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
 
-STAGE1_STEPS="${STAGE1_STEPS:-100000}"
-STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-${STAGE1_STEPS}}"
+STAGE1_STEPS="${STAGE1_STEPS:-5000}"
+STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
 STAGE2_STEPS="${STAGE2_STEPS:-2000}"
 STAGE3_STEPS="${STAGE3_STEPS:-50}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
 PRIOR_NUM_WORKERS="${PRIOR_NUM_WORKERS:-1}"
 PRIOR_N_JOBS="${PRIOR_N_JOBS:-1}"
+NP_SEED="${NP_SEED:-42}"
+TORCH_SEED="${TORCH_SEED:-42}"
 
 if [[ ! "$CURRICULUM_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: CURRICULUM_ID must contain only letters, numbers, '.', '_', or '-'" >&2
@@ -78,6 +82,14 @@ if [[ ! "$PRIOR_N_JOBS" =~ ^[0-9]+$ ]] || (( 10#${PRIOR_N_JOBS} < 1 )); then
     exit 1
 fi
 PRIOR_N_JOBS=$((10#${PRIOR_N_JOBS}))
+for seed_name in NP_SEED TORCH_SEED; do
+    seed_value="${!seed_name}"
+    if [[ ! "$seed_value" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: ${seed_name} must be a non-negative integer (got '${seed_value}')." >&2
+        exit 1
+    fi
+    printf -v "$seed_name" "%d" "$((10#${seed_value}))"
+done
 
 STAGE1_DIR="${CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage1"
 STAGE2_DIR="${CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage2"
@@ -241,12 +253,12 @@ read -r -d '' MODEL_FLAGS <<'EOF' || true
 EOF
 
 # ── Shared training flags ───────────────────────────────────────────────
-read -r -d '' TRAIN_FLAGS <<'EOF' || true
+read -r -d '' TRAIN_FLAGS <<EOF || true
 --task survival
 --device cuda
 --dtype float32
 --amp False
---np_seed 42 --torch_seed 42
+--np_seed ${NP_SEED} --torch_seed ${TORCH_SEED}
 --batch_size 512
 --gradient_clipping 1.0
 --num_bins 50
@@ -297,6 +309,8 @@ if (( _run_1 )); then
         --batch_size_per_gp 4 \
         --micro_batch_size 4 \
         --max_seq_len 1024 \
+        --save_initial_checkpoint True \
+        --save_perm_steps 500,1000,2000 \
         --save_perm_every 5000
 fi
 

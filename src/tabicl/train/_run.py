@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.multiprocessing import set_start_method
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import all_reduce, init_process_group, destroy_process_group, ReduceOp
+from torch.distributed import all_reduce, barrier, init_process_group, destroy_process_group, ReduceOp
 
 from tqdm import tqdm
 
@@ -66,6 +66,30 @@ def _parse_baseline_types(config):
     if isinstance(raw, str):
         return [b.strip() for b in raw.split(",") if b.strip()]
     return raw
+
+
+def _parse_permanent_checkpoint_steps(raw):
+    """Parse and validate exact permanent checkpoint milestones."""
+    if raw is None or raw == "":
+        return set()
+    if not isinstance(raw, str):
+        raise ValueError("save_perm_steps must be a comma-separated string.")
+    try:
+        steps = [int(value.strip()) for value in raw.split(",") if value.strip()]
+    except ValueError as exc:
+        raise ValueError(
+            f"save_perm_steps must contain comma-separated positive integers, got {raw!r}."
+        ) from exc
+    if any(step <= 0 for step in steps):
+        raise ValueError(f"save_perm_steps must contain only positive integers, got {steps}.")
+    if len(steps) != len(set(steps)):
+        raise ValueError(f"save_perm_steps must not contain duplicates, got {steps}.")
+    return set(steps)
+
+
+def _is_permanent_checkpoint(step, save_perm_every, permanent_steps):
+    """Return whether a checkpoint step is protected from temporary cleanup."""
+    return step % save_perm_every == 0 or step in permanent_steps
 
 
 def _masked_discrete_survival_nll(h_raw, bin_idx, delta, valid_mask):
@@ -119,6 +143,9 @@ class Trainer:
     def __init__(self, config):
         self.config = config
         self.survival = getattr(config, "task", "classification") == "survival"
+        self.permanent_checkpoint_steps = _parse_permanent_checkpoint_steps(
+            getattr(config, "save_perm_steps", ""),
+        )
 
         # --- validate survival supervision settings ---
         if self.survival:
@@ -205,6 +232,20 @@ class Trainer:
         self.configure_optimizer()
         self.configure_amp()
         self.restore_training_state()
+        self.save_initial_checkpoint_if_requested()
+
+    def save_initial_checkpoint_if_requested(self):
+        """Save a permanent step-0 checkpoint for a newly initialized run."""
+        if getattr(self.config, "save_initial_checkpoint", False) and self.curr_step == 0:
+            if not self.config.checkpoint_dir:
+                raise ValueError("save_initial_checkpoint requires checkpoint_dir.")
+            if self.master_process:
+                initial_path = os.path.join(self.config.checkpoint_dir, "step-0.ckpt")
+                if not os.path.exists(initial_path):
+                    self.save_checkpoint("step-0.ckpt")
+                    print(f"Saved initial checkpoint to {initial_path}")
+            if self.ddp:
+                barrier()
 
     def configure_ddp(self):
         """Set up distributed training and system configuration."""
@@ -803,100 +844,15 @@ class Trainer:
             print("Checkpoint has legacy raw-time survival metadata; keeping standardized TimeBinner.")
             return
 
-        from tabicl.survival import TimeBinner
+        from tabicl.survival import validate_survival_metadata
 
-        saved_edges = surv_meta["binner_edges"].to(self.config.device)
-        saved_means = surv_meta["binner_means"].to(self.config.device)
-        saved_k = surv_meta.get("num_bins", len(saved_means))
-
-        # Validate metadata integrity
-        if not torch.isfinite(saved_edges).all():
-            raise ValueError("binner_edges contains non-finite values")
-        if not torch.isfinite(saved_means).all():
-            raise ValueError("binner_means contains non-finite values")
-        if not (saved_edges.diff() > 0).all():
-            raise ValueError("binner_edges must be strictly increasing")
-        if len(saved_edges) != saved_k + 1:
-            raise ValueError(
-                f"binner_edges length {len(saved_edges)} != K+1={saved_k + 1}"
-            )
-        if len(saved_means) != saved_k:
-            raise ValueError(
-                f"binner_means length {len(saved_means)} != K={saved_k}"
-            )
-
-        # Validate each mean lies inside its bin
-        for i in range(saved_k):
-            lo, hi = saved_edges[i], saved_edges[i + 1]
-            m = saved_means[i]
-            if m < lo or m > hi:
-                raise ValueError(
-                    f"binner_means[{i}]={m:.4g} outside bin [{lo:.4g}, {hi:.4g}]"
-                )
-
-        # Validate against the loaded model
-        if model is not None:
-            model_k = model.num_quantiles if hasattr(model, "num_quantiles") else model.icl_predictor.decoder.num_bins
-            if saved_k != model_k:
-                raise ValueError(
-                    f"survival_metadata K={saved_k} != model K={model_k}"
-                )
-
-        self.binner = TimeBinner(
-            bin_edges=saved_edges, bin_means=saved_means,
-        ).to(torch.device(self.config.device))
+        self.binner, self.survival_time_scaler_config = validate_survival_metadata(
+            surv_meta, model=model, device=self.config.device,
+        )
+        saved_edges = self.binner.bin_edges
+        saved_k = self.binner.num_bins
         self.config.num_bins = saved_k
         self._binner_restored = True  # Signal configure_binner to skip defaults
-
-        saved_scaler = surv_meta.get("time_scaler", None)
-        if saved_scaler is not None:
-            # Validate required scaler fields
-            scaler_eps = saved_scaler.get("eps", None)
-            scaler_min_scale = saved_scaler.get("min_scale", None)
-            if scaler_eps is None or not float(scaler_eps) > 0 or not math.isfinite(float(scaler_eps)):
-                raise ValueError(
-                    f"Checkpoint scaler has invalid eps: {scaler_eps}"
-                )
-            if scaler_min_scale is None or not float(scaler_min_scale) > 0 or not math.isfinite(float(scaler_min_scale)):
-                raise ValueError(
-                    f"Checkpoint scaler has invalid min_scale: {scaler_min_scale}"
-                )
-            scaler_z_min = saved_scaler.get("z_min", None)
-            scaler_z_max = saved_scaler.get("z_max", None)
-            if scaler_z_min is None or scaler_z_max is None:
-                raise ValueError(
-                    "Checkpoint scaler missing required z_min/z_max fields"
-                )
-            scaler_z_min = float(scaler_z_min)
-            scaler_z_max = float(scaler_z_max)
-            if not math.isfinite(scaler_z_min) or not math.isfinite(scaler_z_max):
-                raise ValueError(
-                    f"Checkpoint scaler has non-finite z_min/z_max: "
-                    f"z_min={scaler_z_min}, z_max={scaler_z_max}"
-                )
-            edge_z_min = float(saved_edges[0])
-            edge_z_max = float(saved_edges[-1])
-            # Use tolerance: float32 edges vs Python floats can differ by ~1e-7
-            if not math.isclose(scaler_z_min, edge_z_min, rel_tol=1e-5, abs_tol=1e-6):
-                raise ValueError(
-                    f"Scaler z_min ({scaler_z_min}) != binner edge[0] ({edge_z_min}). "
-                    f"Checkpoint metadata is inconsistent."
-                )
-            if not math.isclose(scaler_z_max, edge_z_max, rel_tol=1e-5, abs_tol=1e-6):
-                raise ValueError(
-                    f"Scaler z_max ({scaler_z_max}) != binner edge[-1] ({edge_z_max}). "
-                    f"Checkpoint metadata is inconsistent."
-                )
-            self.survival_time_scaler_config = dict(saved_scaler)
-        else:
-            # Derive scaler bounds from restored binner edges so preprocessing
-            # matches the checkpoint rather than CLI defaults.
-            self.survival_time_scaler_config = {
-                "eps": 1e-8,
-                "min_scale": 0.1,
-                "z_min": float(saved_edges[0]),
-                "z_max": float(saved_edges[-1]),
-            }
         if self.master_process:
             print(f"Restored survival metadata from checkpoint: K={saved_k}, "
                   f"z_range=[{saved_edges[0]:.2f}, {saved_edges[-1]:.2f}]")
@@ -1008,7 +964,11 @@ class Trainer:
         for ckpt in checkpoints:
             try:
                 step = int(ckpt.split("-")[1].split(".")[0])
-                if step % self.config.save_perm_every != 0:
+                if not _is_permanent_checkpoint(
+                    step,
+                    self.config.save_perm_every,
+                    self.permanent_checkpoint_steps,
+                ):
                     temp_checkpoints.append((step, ckpt))
             except Exception:
                 continue
@@ -1066,11 +1026,15 @@ class Trainer:
                     display_results["lr"] = f"{step_lr:.3e}"
                     step_progress.set_postfix(**display_results)
 
-                    if self.curr_step % self.config.save_temp_every == 0 or self.curr_step % self.config.save_perm_every == 0:
+                    is_temp = self.curr_step % self.config.save_temp_every == 0
+                    is_perm = _is_permanent_checkpoint(
+                        self.curr_step,
+                        self.config.save_perm_every,
+                        self.permanent_checkpoint_steps,
+                    )
+                    if is_temp or is_perm:
                         ckpt_name = f"step-{self.curr_step}.ckpt"
                         self.save_checkpoint(name=ckpt_name)
-                        is_temp = self.curr_step % self.config.save_temp_every == 0
-                        is_perm = self.curr_step % self.config.save_perm_every == 0
                         if is_temp and not is_perm and self.config.max_checkpoints > 0:
                             self.manage_checkpoint()
 

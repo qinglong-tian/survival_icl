@@ -34,6 +34,8 @@ from tabicl.survival._loss import (
     oracle_query_pinball_loss,
 )
 from tabicl.survival._scaler import SurvivalTimeScaler, standardize_survival_micro_batch
+from tabicl.survival._checkpoint import load_survival_checkpoint, validate_survival_metadata
+from tabicl.survival._inference import SurvivalPrediction, TabICLSurvivalPredictor
 
 __all__ = [
     "TimeBinner",
@@ -46,6 +48,10 @@ __all__ = [
     "SurvivalTimeScaler",
     "standardize_survival_micro_batch",
     "scale_survival_context",
+    "load_survival_checkpoint",
+    "validate_survival_metadata",
+    "SurvivalPrediction",
+    "TabICLSurvivalPredictor",
 ]
 
 

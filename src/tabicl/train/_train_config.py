@@ -309,6 +309,12 @@ def build_parser():
     parser.add_argument("--save_temp_every", default=50, type=int, help="Steps between temporary checkpoints")
     parser.add_argument("--save_perm_every", default=5000, type=int, help="Steps between permanent checkpoints")
     parser.add_argument(
+        "--save_perm_steps",
+        default="",
+        type=str,
+        help="Comma-separated exact checkpoint steps to preserve permanently",
+    )
+    parser.add_argument(
         "--max_checkpoints",
         type=int,
         default=5,
@@ -316,5 +322,11 @@ def build_parser():
     )
     parser.add_argument("--checkpoint_path", default=None, type=str, help="Path to specific checkpoint file to load")
     parser.add_argument("--only_load_model", default=False, type=str2bool, help="Whether to only load model weights")
+    parser.add_argument(
+        "--save_initial_checkpoint",
+        default=False,
+        type=str2bool,
+        help="Save step-0.ckpt after model/optimizer initialization when starting a new run",
+    )
 
     return parser
