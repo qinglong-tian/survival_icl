@@ -247,5 +247,21 @@ downcast through FlashAttention-3. The Nibi launcher uses one background prior
 worker with three within-batch generation threads per rank, targeting its eight
 allocated CPU cores without multiplying full-batch prefetch memory.
 
+Fir uses a fully isolated environment and launcher so changes do not affect the
+known-good Nibi path:
+```bash
+sbatch scripts/setup_fir_env.sh
+sbatch scripts/preflight_fir.sh
+sbatch scripts/train_survival_stage1_fir.sh
+sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal scripts/train_survival_stage1_fir.sh
+```
+The Fir environment defaults to
+`/project/6079932/$USER/venvs/survival-icl-fir-py311`, uses
+`python/3.11.5`, and is created on a CPU compute node. The Fir preflight must
+pass direct driver initialization, tensor execution on both H100s, and a
+two-rank NCCL all-reduce before training is submitted. The Fir launcher uses
+12 CPU cores to align with the GPU-node NUMA guidance and writes to separate
+Fir checkpoint directories.
+
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.
