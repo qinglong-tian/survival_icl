@@ -264,12 +264,18 @@ def test_stage1_pilot_script_defaults_and_chunk_seed_derivation():
     assert 'EVAL_STEPS="${EVAL_STEPS:-0,500,1000,2000,5000}"' in evaluation
     assert "#SBATCH --account=aip-qltian" in vulcan
     assert "#SBATCH --gres=gpu:4" in vulcan
+    assert "#SBATCH --cpus-per-task=16" in vulcan
+    assert "#SBATCH --mem=64G" in vulcan
     assert 'STAGE1_MICRO_BATCH_SIZE="${STAGE1_MICRO_BATCH_SIZE:-2}"' in vulcan
     assert "NP_SEED=$((BASE_NP_SEED + CURRENT_STEP))" in vulcan
     assert "TORCH_SEED=$((BASE_TORCH_SEED + CURRENT_STEP))" in vulcan
+    assert 'export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"' in vulcan
+    assert "pip install" not in vulcan
     assert "#SBATCH --gres=gpu:1" in vulcan_evaluation
     assert 'TASK_BATCH_SIZE="${TASK_BATCH_SIZE:-2}"' in vulcan_evaluation
     assert "--task-batch-size \"$TASK_BATCH_SIZE\"" in vulcan_evaluation
+    assert 'export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"' in vulcan_evaluation
+    assert "pip install" not in vulcan_evaluation
 
 
 def test_exact_checkpoint_milestones_are_permanent():

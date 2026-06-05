@@ -40,7 +40,24 @@ fi
 source "$VENV_PATH"
 
 cd "$REPO_DIR"
-python -m pip install -e . --no-deps --no-build-isolation --quiet
+export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+python -c "
+from pathlib import Path
+
+import numpy
+import scipy
+import tabicl
+import torch
+
+repo = Path('${REPO_DIR}').resolve()
+loaded = Path(tabicl.__file__).resolve()
+expected = (repo / 'src' / 'tabicl').resolve()
+if expected not in loaded.parents:
+    raise RuntimeError(f'Loaded tabicl from {loaded}, expected source under {expected}')
+print(f'Python environment OK: {Path(torch.__file__).resolve().parent.parent}')
+print(f'TabICL source: {loaded}')
+"
 
 echo "============================================"
 echo "Vulcan Survival Stage 1 Evaluation"

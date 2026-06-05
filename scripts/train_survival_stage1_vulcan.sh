@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 #SBATCH --time=00:45:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
@@ -27,7 +27,7 @@
 # Vulcan uses four 48 GB L40S GPUs by default. Stage 1 micro-batches default to
 # two tasks per GPU to leave memory headroom. Override STAGE1_MICRO_BATCH_SIZE=1
 # after a test if needed. A one-GPU smoke test can be submitted with:
-#   sbatch --gres=gpu:1 --cpus-per-task=8 scripts/train_survival_stage1_vulcan.sh
+#   sbatch --gres=gpu:1 --cpus-per-task=4 --mem=16G scripts/train_survival_stage1_vulcan.sh
 
 set -euo pipefail
 
@@ -129,7 +129,7 @@ if [[ ! "$GPU_COUNT" =~ ^[0-9]+$ ]] || (( GPU_COUNT < 1 || GPU_COUNT > 4 )); the
     echo "ERROR: This launcher requires between 1 and 4 allocated GPUs (got '${SLURM_GPUS_ON_NODE:-unset}')." >&2
     exit 2
 fi
-CPU_COUNT="${SLURM_CPUS_PER_TASK:-32}"
+CPU_COUNT="${SLURM_CPUS_PER_TASK:-16}"
 
 export CURRICULUM_ID
 export RUN_MODE
@@ -197,7 +197,31 @@ fi
 export REPO_DIR
 
 cd "$REPO_DIR"
-python -m pip install -e . --no-deps --no-build-isolation --quiet 2>&1 | tail -2
+export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+python -c "
+from pathlib import Path
+
+import einops
+import huggingface_hub
+import numpy
+import psutil
+import scipy
+import sklearn
+import tabicl
+import torch
+import tqdm
+import transformers
+import wandb
+
+repo = Path('${REPO_DIR}').resolve()
+loaded = Path(tabicl.__file__).resolve()
+expected = (repo / 'src' / 'tabicl').resolve()
+if expected not in loaded.parents:
+    raise RuntimeError(f'Loaded tabicl from {loaded}, expected source under {expected}')
+print(f'Python environment OK: {Path(torch.__file__).resolve().parent.parent}')
+print(f'TabICL source: {loaded}')
+"
 
 WANDB_DIR="${WANDB_DIR:-${SURVIVAL_CHECKPOINT_DIR}/wandb}"
 STAGE1_DIR="${SURVIVAL_CHECKPOINT_DIR}/survival_mix_${CURRICULUM_ID}_stage1"
