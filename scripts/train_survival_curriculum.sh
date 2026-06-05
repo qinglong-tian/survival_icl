@@ -16,6 +16,8 @@
 #   STAGE1_STEPS       — override Stage 1 max steps (default: 5000)
 #   STAGE1_SCHEDULER_STEPS
 #                      — Stage 1 LR horizon for chunked runs (default: 100000)
+#   STAGE1_MICRO_BATCH_SIZE
+#                      — Stage 1 micro-batch per GPU (default: 4)
 #   STAGE2_STEPS       — override Stage 2 max steps (default: 2000)
 #   STAGE3_STEPS       — override Stage 3 max steps (default: 50)
 #   SURVIVAL_QUERY_PINBALL_WEIGHT
@@ -59,6 +61,7 @@ CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
 
 STAGE1_STEPS="${STAGE1_STEPS:-5000}"
 STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
+STAGE1_MICRO_BATCH_SIZE="${STAGE1_MICRO_BATCH_SIZE:-4}"
 STAGE2_STEPS="${STAGE2_STEPS:-2000}"
 STAGE3_STEPS="${STAGE3_STEPS:-50}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
@@ -166,6 +169,15 @@ guard_stale_checkpoints() {
 }
 
 if (( _run_1 )); then
+    if [[ ! "$STAGE1_MICRO_BATCH_SIZE" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Stage1 micro-batch size must be a positive decimal integer (got ${STAGE1_MICRO_BATCH_SIZE})" >&2
+        exit 1
+    fi
+    STAGE1_MICRO_BATCH_SIZE=$((10#${STAGE1_MICRO_BATCH_SIZE}))
+    if (( STAGE1_MICRO_BATCH_SIZE <= 0 || 4 % STAGE1_MICRO_BATCH_SIZE != 0 )); then
+        echo "ERROR: Stage1 micro-batch size (${STAGE1_MICRO_BATCH_SIZE}) must be a positive divisor of batch_size_per_gp=4" >&2
+        exit 1
+    fi
     if [[ ! "$STAGE1_STEPS" =~ ^[0-9]+$ ]]; then
         echo "ERROR: Stage1 steps must be a positive decimal integer (got ${STAGE1_STEPS})" >&2; exit 1
     fi
@@ -307,7 +319,7 @@ if (( _run_1 )); then
         --scheduler_total_steps "${STAGE1_SCHEDULER_STEPS}" \
         --warmup_proportion 0.02 \
         --batch_size_per_gp 4 \
-        --micro_batch_size 4 \
+        --micro_batch_size "${STAGE1_MICRO_BATCH_SIZE}" \
         --max_seq_len 1024 \
         --save_initial_checkpoint True \
         --save_perm_steps 500,1000,2000 \

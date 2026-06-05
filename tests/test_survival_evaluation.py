@@ -248,9 +248,12 @@ def test_stage1_pilot_script_defaults_and_chunk_seed_derivation():
     curriculum = open("scripts/train_survival_curriculum.sh").read()
     nibi = open("scripts/train_survival_stage1_nibi.sh").read()
     evaluation = open("scripts/evaluate_survival_stage1_nibi.sh").read()
+    vulcan = open("scripts/train_survival_stage1_vulcan.sh").read()
+    vulcan_evaluation = open("scripts/evaluate_survival_stage1_vulcan.sh").read()
     assert 'RUN_STAGES="${RUN_STAGES-1}"' in curriculum
     assert 'STAGE1_STEPS="${STAGE1_STEPS:-5000}"' in curriculum
     assert 'STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"' in curriculum
+    assert 'STAGE1_MICRO_BATCH_SIZE="${STAGE1_MICRO_BATCH_SIZE:-4}"' in curriculum
     assert "TRAIN_FLAGS <<EOF" in curriculum
     assert "TRAIN_FLAGS <<'EOF'" not in curriculum
     assert "--save_initial_checkpoint True" in curriculum
@@ -259,6 +262,14 @@ def test_stage1_pilot_script_defaults_and_chunk_seed_derivation():
     assert "NP_SEED=$((BASE_NP_SEED + CURRENT_STEP))" in nibi
     assert "TORCH_SEED=$((BASE_TORCH_SEED + CURRENT_STEP))" in nibi
     assert 'EVAL_STEPS="${EVAL_STEPS:-0,500,1000,2000,5000}"' in evaluation
+    assert "#SBATCH --account=aip-qltian" in vulcan
+    assert "#SBATCH --gres=gpu:4" in vulcan
+    assert 'STAGE1_MICRO_BATCH_SIZE="${STAGE1_MICRO_BATCH_SIZE:-2}"' in vulcan
+    assert "NP_SEED=$((BASE_NP_SEED + CURRENT_STEP))" in vulcan
+    assert "TORCH_SEED=$((BASE_TORCH_SEED + CURRENT_STEP))" in vulcan
+    assert "#SBATCH --gres=gpu:1" in vulcan_evaluation
+    assert 'TASK_BATCH_SIZE="${TASK_BATCH_SIZE:-2}"' in vulcan_evaluation
+    assert "--task-batch-size \"$TASK_BATCH_SIZE\"" in vulcan_evaluation
 
 
 def test_exact_checkpoint_milestones_are_permanent():
