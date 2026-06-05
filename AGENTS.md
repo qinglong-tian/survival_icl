@@ -252,10 +252,11 @@ The launcher performs a real CUDA allocation before starting `torchrun`; an
 NVML-only device count is insufficient because Fir can list GPUs even when an
 incompatible PyTorch CUDA runtime cannot initialize them. It also runs a
 two-rank NCCL all-reduce preflight. GPU commands run inside an explicit
-single-task `srun` step so Fir grants the task access to both allocated GPUs.
-If driver-level `cuInit` still returns `CUDA_ERROR_NO_DEVICE`, rebuilding the
-Python environment cannot fix it; send the job ID and preflight log to Alliance
-support.
+single-task `srun` step that inherits both GPUs from the batch allocation. Do
+not add a step-level `--gpus-per-task` option on Fir; its Slurm configuration
+rejects that GRES specification. If driver-level `cuInit` still returns
+`CUDA_ERROR_NO_DEVICE`, rebuilding the Python environment cannot fix it; send
+the job ID and preflight log to Alliance support.
 
 The previous disk-based generation script is archived at
 `scripts/_upstream/survival_curriculum.sh`.

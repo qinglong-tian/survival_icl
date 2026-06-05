@@ -110,7 +110,6 @@ CPU_COUNT="${SLURM_CPUS_PER_TASK:-8}"
 SRUN_ARGS=(
     --ntasks=1
     --cpus-per-task="$CPU_COUNT"
-    --gpus-per-task="$GPU_COUNT"
     --kill-on-bad-exit=1
 )
 
