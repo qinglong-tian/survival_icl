@@ -553,6 +553,8 @@ class SCMPrior(Prior):
         while True:
             X, y = prior_cls(**params)()
             X, y = Reg2Cls(params)(X, y)
+            if not torch.isfinite(X).all():
+                continue
 
             # Add batch dim for single dataset to be compatible with delete_unique_features and sanity_check
             X, y = X.unsqueeze(0), y.unsqueeze(0)

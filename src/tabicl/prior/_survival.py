@@ -1116,6 +1116,8 @@ class SurvivalSCMPrior(SCMPrior):
         for _ in range(max_attempts):
             X, y = prior_cls(**params)()
             X, y = Reg2Cls(params)(X, y)
+            if not torch.isfinite(X).all():
+                continue
 
             X, y = X.unsqueeze(0), y.unsqueeze(0)
             d = torch.tensor([params["num_features"]], device=self.device, dtype=torch.long)

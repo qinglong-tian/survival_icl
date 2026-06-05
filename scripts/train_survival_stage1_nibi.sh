@@ -22,15 +22,15 @@
 #   sbatch --time=08:00:00 --export=ALL,RUN_MODE=formal \
 #       scripts/train_survival_stage1_nibi.sh
 #
-# Important: STAGE1_SCHEDULER_STEPS remains fixed at the formal target so the
-# cosine schedule is identical to one uninterrupted 100,000-step run.
+# Test mode uses a compressed 5,000-step scheduler horizon so short stability
+# runs reach the full Stage 1 learning rate. Set STAGE1_SCHEDULER_STEPS=100000
+# to reproduce the exact beginning of the formal schedule.
 
 set -euo pipefail
 
 RUN_MODE="${RUN_MODE:-test}"
 JOB_ID="${SLURM_JOB_ID:-local}"
 STAGE1_CHUNK_TIME="${STAGE1_CHUNK_TIME:-08:00:00}"
-STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 SURVIVAL_QUERY_PINBALL_WEIGHT="${SURVIVAL_QUERY_PINBALL_WEIGHT:-0.0}"
 SURVIVAL_QUERY_PINBALL_QUANTILES="${SURVIVAL_QUERY_PINBALL_QUANTILES:-0.1,0.25,0.5,0.75,0.9}"
@@ -42,6 +42,7 @@ case "$RUN_MODE" in
     test)
         STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-50}"
         STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-50}"
+        STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-5000}"
         CURRICULUM_ID="${CURRICULUM_ID:-nibi_stage1_test_${JOB_ID}}"
         SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-icl-tests/${JOB_ID}}"
         AUTO_RESUBMIT=0
@@ -49,6 +50,7 @@ case "$RUN_MODE" in
     formal)
         STAGE1_TARGET_STEPS="${STAGE1_TARGET_STEPS:-100000}"
         STAGE1_CHUNK_STEPS="${STAGE1_CHUNK_STEPS:-500}"
+        STAGE1_SCHEDULER_STEPS="${STAGE1_SCHEDULER_STEPS:-100000}"
         CURRICULUM_ID="${CURRICULUM_ID:-author_adapted_v1}"
         SURVIVAL_CHECKPOINT_DIR="${SURVIVAL_CHECKPOINT_DIR:-/scratch/${USER}/survival-icl}"
         AUTO_RESUBMIT=1
@@ -212,7 +214,7 @@ echo "Scheduler horizon:${STAGE1_SCHEDULER_STEPS}"
 echo "Checkpoint dir:   ${STAGE1_DIR}"
 echo "WandB mode:       ${WANDB_MODE}"
 if [[ "$RUN_MODE" == "test" ]]; then
-    echo "LR interpretation: this test remains inside the $((STAGE1_SCHEDULER_STEPS * 2 / 100))-step warmup."
+    echo "LR interpretation: test warmup lasts $((STAGE1_SCHEDULER_STEPS * 2 / 100)) steps."
 fi
 echo "============================================"
 
