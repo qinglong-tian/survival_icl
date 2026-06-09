@@ -96,11 +96,22 @@ class TabICLSurvivalEstimator(BaseEstimator):
         Path to a modern ``km_hybrid_log`` TabICL survival checkpoint.
     device : str, default="cpu"
         Torch device for model inference.
-    max_context_size : int, default=512
+    max_context_size : int or None, default=None
         Maximum number of support rows retained for the in-context prompt.
-        Larger support sets are deterministically subsampled.
+        When ``None`` (the default), all rows from ``fit`` are used without
+        subsampling. Pass an explicit integer to cap the context set size;
+        larger support sets are then deterministically subsampled.
+
+        This limit exists because TabICL was trained with a maximum sequence
+        length (context + query rows combined). For a Stage-1 checkpoint the
+        training limit is ~1,024 total positions; for a Stage-3 checkpoint it
+        is ~60,000. If your context set exceeds the training sequence length,
+        set ``max_context_size`` to stay within it.
     query_batch_size : int, default=512
-        Number of query rows evaluated per model forward pass.
+        Number of query rows evaluated per model forward pass. Lower values
+        reduce peak memory; raise this if you have spare RAM/VRAM and want
+        faster inference on large query sets. Most users can leave this at
+        the default.
     standardize_features : bool, default=True
         Whether to z-score features using context rows only.
     random_state : int, default=42
@@ -114,7 +125,7 @@ class TabICLSurvivalEstimator(BaseEstimator):
         checkpoint_path: str | Path,
         *,
         device: str = "cpu",
-        max_context_size: int = 512,
+        max_context_size: int | None = None,
         query_batch_size: int = 512,
         standardize_features: bool = True,
         random_state: int = 42,
@@ -135,8 +146,8 @@ class TabICLSurvivalEstimator(BaseEstimator):
         array with ``time``/``event`` or ``t``/``delta`` fields, or a dict with
         those keys. Alternatively pass ``t=`` and ``delta=`` explicitly.
         """
-        if self.max_context_size < 1:
-            raise ValueError("max_context_size must be positive.")
+        if self.max_context_size is not None and self.max_context_size < 1:
+            raise ValueError("max_context_size must be positive or None.")
         if self.query_batch_size < 1:
             raise ValueError("query_batch_size must be positive.")
 
@@ -172,7 +183,7 @@ class TabICLSurvivalEstimator(BaseEstimator):
         else:
             self.feature_scaler_ = None
 
-        if n_samples > self.max_context_size:
+        if self.max_context_size is not None and n_samples > self.max_context_size:
             rng = np.random.default_rng(self.random_state)
             indices = np.sort(rng.choice(n_samples, self.max_context_size, replace=False))
             warnings.warn(
