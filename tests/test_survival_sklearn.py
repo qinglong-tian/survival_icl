@@ -179,6 +179,31 @@ def test_impute_censored_survival_times_supports_mean_and_reproducibility(tmp_pa
     assert np.allclose(first.soft_times, second.soft_times)
 
 
+def test_impute_censored_survival_times_supports_unconditional_mode(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(6).normal(size=(7, 2)).astype(np.float32)
+    t = np.arange(1.0, 8.0, dtype=np.float32)
+    delta = np.array([1, 0, 1, 0, 1, 1, 0], dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=2,
+        random_state=10,
+        condition_on_censoring=False,
+    )
+
+    assert result.condition_on_censoring is False
+    assert result.survival_curves is result.conditional_survival
+    assert result.hard_times.shape == (3,)
+    assert result.soft_times.shape == (3, 2)
+    assert np.isfinite(result.hard_times).all()
+    assert np.isfinite(result.soft_times).all()
+
+
 def test_impute_censored_survival_times_no_censored_rows(tmp_path):
     checkpoint = tmp_path / "step-0.ckpt"
     tiny_survival_checkpoint(checkpoint)

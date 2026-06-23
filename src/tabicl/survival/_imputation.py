@@ -30,6 +30,12 @@ class CensoredImputationResult:
     time_grid: np.ndarray
     conditional_survival: np.ndarray
     hard_method: str
+    condition_on_censoring: bool
+
+    @property
+    def survival_curves(self) -> np.ndarray:
+        """Survival curves used for imputation."""
+        return self.conditional_survival
 
 
 def _take_rows(X, indices: np.ndarray):
@@ -38,17 +44,18 @@ def _take_rows(X, indices: np.ndarray):
     return np.asarray(X)[indices]
 
 
-def _conditional_median(
+def _survival_median(
     grid: np.ndarray,
     curves: np.ndarray,
-    censor_times: np.ndarray,
+    lower_bounds: np.ndarray,
 ) -> np.ndarray:
     medians = np.empty(curves.shape[0], dtype=np.float32)
     for row_idx, survival in enumerate(curves):
-        after = grid > censor_times[row_idx]
+        lower = lower_bounds[row_idx]
+        after = grid > lower
         eligible = after & (survival <= 0.5)
         if not eligible.any():
-            medians[row_idx] = np.float32(max(censor_times[row_idx], grid[-1]))
+            medians[row_idx] = np.float32(max(lower, grid[-1]))
             continue
         hit = int(np.argmax(eligible))
         prev = max(hit - 1, 0)
@@ -61,43 +68,44 @@ def _conditional_median(
         else:
             weight = (0.5 - s0) / (s1 - s0)
             medians[row_idx] = np.float32(t0 + np.clip(weight, 0.0, 1.0) * (t1 - t0))
-    return np.maximum(medians, censor_times).astype(np.float32)
+    return np.maximum(medians, lower_bounds).astype(np.float32)
 
 
-def _conditional_restricted_mean(
+def _survival_restricted_mean(
     grid: np.ndarray,
     curves: np.ndarray,
-    censor_times: np.ndarray,
+    lower_bounds: np.ndarray,
 ) -> np.ndarray:
     means = np.empty(curves.shape[0], dtype=np.float32)
     for row_idx, survival in enumerate(curves):
-        c_i = float(censor_times[row_idx])
-        post_grid = grid[grid > c_i]
+        lower = float(lower_bounds[row_idx])
+        post_grid = grid[grid > lower]
         if post_grid.size == 0:
-            means[row_idx] = np.float32(c_i)
+            means[row_idx] = np.float32(lower)
             continue
-        eval_grid = np.concatenate([[c_i], post_grid])
-        eval_survival = np.concatenate([[1.0], survival[grid > c_i].astype(np.float64)])
+        s_lower = float(np.interp(lower, grid, survival, left=1.0, right=survival[-1]))
+        eval_grid = np.concatenate([[lower], post_grid])
+        eval_survival = np.concatenate([[s_lower], survival[grid > lower].astype(np.float64)])
         restricted_residual = _trapezoid(eval_survival, eval_grid)
-        means[row_idx] = np.float32(c_i + restricted_residual)
-    return np.maximum(means, censor_times).astype(np.float32)
+        means[row_idx] = np.float32(lower + restricted_residual)
+    return np.maximum(means, lower_bounds).astype(np.float32)
 
 
-def _sample_conditional_times(
+def _sample_survival_times(
     grid: np.ndarray,
     curves: np.ndarray,
-    censor_times: np.ndarray,
+    lower_bounds: np.ndarray,
     rng: np.random.Generator,
 ) -> np.ndarray:
     samples = np.empty(curves.shape[0], dtype=np.float32)
     for row_idx, survival in enumerate(curves):
-        c_i = float(censor_times[row_idx])
+        lower = float(lower_bounds[row_idx])
         u = float(rng.uniform())
         event_cdf = 1.0 - survival
-        after = grid > c_i
+        after = grid > lower
         eligible = after & (event_cdf >= u)
         if not eligible.any():
-            samples[row_idx] = np.float32(max(c_i, grid[-1]))
+            samples[row_idx] = np.float32(max(lower, grid[-1]))
             continue
         hit = int(np.argmax(eligible))
         prev = max(hit - 1, 0)
@@ -110,7 +118,7 @@ def _sample_conditional_times(
         else:
             weight = (u - f0) / (f1 - f0)
             samples[row_idx] = np.float32(t0 + np.clip(weight, 0.0, 1.0) * (t1 - t0))
-    return np.maximum(samples, censor_times).astype(np.float32)
+    return np.maximum(samples, lower_bounds).astype(np.float32)
 
 
 def impute_censored_survival_times(
@@ -127,16 +135,20 @@ def impute_censored_survival_times(
     query_batch_size: int = 512,
     standardize_features: bool = True,
     times: Sequence[float] | None = None,
+    condition_on_censoring: bool = True,
 ) -> CensoredImputationResult:
     """Impute event times for censored units with a pretrained survival model.
 
     The full survival dataset is used as the in-context support set, including
     the censored rows being imputed.  This is a transductive imputation: each
     censored unit's own ``(t, delta=0)`` observation is present in the prompt
-    while its event time is queried.  Hard imputation returns either the
-    conditional median event time or a finite-horizon restricted conditional
-    mean.  Soft imputation samples event times from the model's conditional
-    survival curve ``S(t | T > censor_time, X)`` on the raw time grid.
+    while its event time is queried.
+
+    When ``condition_on_censoring=True`` (default), hard and soft imputations
+    use ``S(t | T > censor_time, X)`` and are constrained to be at least the
+    observed censoring time.  When ``False``, they use the unconditional
+    ``S(t | X)`` predicted by the model; imputed event times may then be earlier
+    than the observed censoring time.
 
     Parameters
     ----------
@@ -159,6 +171,9 @@ def impute_censored_survival_times(
     times : sequence of float, optional
         Raw time grid for conditional survival evaluation.  If omitted, the
         checkpoint's context-specific raw grid is used.
+    condition_on_censoring : bool, default=True
+        Whether to condition query curves on each censored row's observed
+        censoring time.
 
     Returns
     -------
@@ -189,6 +204,7 @@ def impute_censored_survival_times(
             time_grid=np.empty(0, dtype=np.float64),
             conditional_survival=np.empty((0, 0), dtype=np.float32),
             hard_method=hard_method,
+            condition_on_censoring=condition_on_censoring,
         )
 
     estimator = TabICLSurvivalEstimator(
@@ -204,17 +220,21 @@ def impute_censored_survival_times(
     grid, curves = estimator.predict_survival_function(
         X_censored,
         times=times,
-        conditional_time=censor_times,
+        conditional_time=censor_times if condition_on_censoring else None,
         return_times=True,
     )
-    if hard_method == "median":
-        hard_times = _conditional_median(grid, curves, censor_times)
+    if condition_on_censoring:
+        lower_bounds = censor_times
     else:
-        hard_times = _conditional_restricted_mean(grid, curves, censor_times)
+        lower_bounds = np.zeros_like(censor_times, dtype=np.float32)
+    if hard_method == "median":
+        hard_times = _survival_median(grid, curves, lower_bounds)
+    else:
+        hard_times = _survival_restricted_mean(grid, curves, lower_bounds)
 
     rng = random_state if isinstance(random_state, np.random.Generator) else np.random.default_rng(random_state)
     soft_times = np.column_stack([
-        _sample_conditional_times(grid, curves, censor_times, rng)
+        _sample_survival_times(grid, curves, lower_bounds, rng)
         for _ in range(n_soft_samples)
     ]).astype(np.float32)
 
@@ -232,4 +252,5 @@ def impute_censored_survival_times(
         time_grid=grid,
         conditional_survival=curves,
         hard_method=hard_method,
+        condition_on_censoring=condition_on_censoring,
     )
