@@ -7,7 +7,11 @@ import pytest
 import torch
 
 from tabicl._model.tabicl import TabICL
-from tabicl.survival import TabICLSurvivalEstimator, TimeBinner
+from tabicl.survival import (
+    TabICLSurvivalEstimator,
+    TimeBinner,
+    impute_censored_survival_times,
+)
 
 
 def tiny_survival_checkpoint(path):
@@ -112,3 +116,86 @@ def test_survival_estimator_predict_returns_median(tmp_path):
 
     assert median.shape == (4,)
     assert np.allclose(median, quantile[:, 0])
+
+
+def test_impute_censored_survival_times_returns_completed_vectors(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(2).normal(size=(8, 3)).astype(np.float32)
+    t = np.linspace(1.0, 8.0, 8, dtype=np.float32)
+    delta = np.array([1, 0, 1, 1, 0, 1, 0, 1], dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=3,
+        random_state=123,
+        device="cpu",
+        query_batch_size=2,
+    )
+
+    assert result.censored_indices.tolist() == [1, 4, 6]
+    assert result.hard_times.shape == (3,)
+    assert result.soft_times.shape == (3, 3)
+    assert result.completed_hard_times.shape == t.shape
+    assert result.completed_soft_times.shape == (8, 3)
+    assert np.all(result.hard_times >= t[result.censored_indices])
+    assert np.all(result.soft_times >= t[result.censored_indices, None])
+    assert np.allclose(result.completed_hard_times[delta == 1], t[delta == 1])
+    assert np.allclose(result.completed_soft_times[delta == 1], t[delta == 1, None])
+    assert np.all(np.diff(result.conditional_survival, axis=1) <= 1e-6)
+
+
+def test_impute_censored_survival_times_supports_mean_and_reproducibility(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(3).normal(size=(7, 2)).astype(np.float32)
+    t = np.arange(1.0, 8.0, dtype=np.float32)
+    delta = np.array([1, 0, 1, 0, 1, 1, 0], dtype=np.float32)
+
+    first = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        hard_method="mean",
+        n_soft_samples=2,
+        random_state=12,
+    )
+    second = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        hard_method="mean",
+        n_soft_samples=2,
+        random_state=12,
+    )
+
+    assert first.hard_method == "mean"
+    assert np.all(first.hard_times >= t[first.censored_indices])
+    assert np.allclose(first.soft_times, second.soft_times)
+
+
+def test_impute_censored_survival_times_no_censored_rows(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(4).normal(size=(5, 2)).astype(np.float32)
+    t = np.arange(1.0, 6.0, dtype=np.float32)
+    delta = np.ones(5, dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=2,
+    )
+
+    assert result.censored_indices.size == 0
+    assert result.hard_times.size == 0
+    assert result.soft_times.shape == (0, 2)
+    assert np.allclose(result.completed_hard_times, t)
+    assert np.allclose(result.completed_soft_times, t[:, None])

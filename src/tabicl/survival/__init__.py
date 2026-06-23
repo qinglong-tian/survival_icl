@@ -33,7 +33,18 @@ from tabicl.survival._loss import (
 )
 from tabicl.survival._scaler import SurvivalTimeScaler, standardize_survival_micro_batch
 from tabicl.survival._checkpoint import load_survival_checkpoint, validate_survival_metadata
+from tabicl.survival._imputation import (
+    CensoredImputationResult,
+    impute_censored_survival_times,
+)
 from tabicl.survival._inference import SurvivalPrediction, TabICLSurvivalPredictor
+from tabicl.survival._real_datasets import (
+    RealSurvivalDataset,
+    RealSurvivalDatasetSpec,
+    dataset_names,
+    load_all_real_survival_benchmarks,
+    load_real_survival_benchmark,
+)
 from tabicl.survival._sklearn import TabICLSurvivalEstimator
 
 __all__ = [
@@ -50,6 +61,13 @@ __all__ = [
     "SurvivalPrediction",
     "TabICLSurvivalPredictor",
     "TabICLSurvivalEstimator",
+    "CensoredImputationResult",
+    "impute_censored_survival_times",
+    "RealSurvivalDataset",
+    "RealSurvivalDatasetSpec",
+    "dataset_names",
+    "load_real_survival_benchmark",
+    "load_all_real_survival_benchmarks",
 ]
 
 

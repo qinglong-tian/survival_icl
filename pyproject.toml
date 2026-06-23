@@ -71,11 +71,22 @@ finetune = [
     "transformers",  # get_scheduler reuses the pretraining cosine-warmup schedules
     "wandb",  # optional, only engaged when wandb_kwargs is passed
 ]
+benchmark = [
+    "pandas",
+    "matplotlib>=3.10.3",
+    "lifelines>=0.30.0",
+]
+survival-notebook = [
+    "pandas",
+    "matplotlib>=3.10.3",
+    "jupyterlab",
+    "ipykernel",
+]
 test = [
     "pandas",
 ]
 all = [
-    "tabicl[doc,forecast,shap,pretrain,finetune,test]",
+    "tabicl[doc,forecast,shap,pretrain,finetune,benchmark,survival-notebook,test]",
 ]
 
 [build-system]
