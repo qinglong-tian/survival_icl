@@ -17,27 +17,22 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 
-try:
-    from benchmark_comparison import (
-        DEFAULT_CHECKPOINT_PATH,
-        EPS,
-        FAMILIES,
-        _unpack_params,
-        cumulative_hazard0,
-        log_hazard0,
-    )
-except ImportError:
-    from scripts.benchmark_comparison import (
-        DEFAULT_CHECKPOINT_PATH,
-        EPS,
-        FAMILIES,
-        _unpack_params,
-        cumulative_hazard0,
-        log_hazard0,
-    )
-
+from tabicl.survival._curves import (
+    condition_survival_curves,
+    kaplan_meier_survival_curve as km_survival_curve,
+    sample_survival_times,
+    survival_median,
+)
+from tabicl.survival._parametric_ph import (
+    EPS,
+    FAMILIES,
+    ParametricPHEstimate,
+    cumulative_hazard0,
+    fit_parametric_ph_mle,
+    ph_negative_log_likelihood,
+    unpack_params as _unpack_params,
+)
 from tabicl.survival._real_datasets import (
     DEFAULT_REAL_SURVIVAL_DATA_DIR,
     dataset_names as registered_dataset_names,
@@ -45,6 +40,9 @@ from tabicl.survival._real_datasets import (
 )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = _REPO_ROOT.parent
+DEFAULT_CHECKPOINT_PATH = _PROJECT_ROOT / "checkpoints" / "step-5000.ckpt"
 DEFAULT_OUTPUT_DIR = Path("survival_eval_results") / "real_imputation_quality_comparison"
 QUALITY_METRICS = [
     "median_mae",
@@ -100,28 +98,20 @@ class ImputationOutput:
     samples: np.ndarray
 
 
-@dataclass
-class ParametricPHEstimate:
-    """Fitted parametric PH model state used for imputation."""
-
-    beta: np.ndarray
-    baseline_params: dict[str, float]
-
-
-def _trapezoid(y, x, *, axis: int = -1):
-    rule = getattr(np, "trapezoid", None)
-    if rule is None:
-        rule = np.trapz
-    return rule(y, x, axis=axis)
-
-
 def _csv_tuple(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def encode_real_features(X) -> tuple[np.ndarray, tuple[str, ...]]:
+def encode_real_features(
+    X,
+    *,
+    categorical_columns: tuple[str, ...] = (),
+) -> tuple[np.ndarray, tuple[str, ...]]:
     """Return standardized numeric features for real benchmark methods."""
     frame = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+    for column in categorical_columns:
+        if column in frame:
+            frame[column] = frame[column].astype("category")
     encoded = pd.get_dummies(frame, drop_first=True, dtype=np.float64)
     if encoded.shape[1] == 0:
         raise ValueError("Encoded feature matrix has no columns.")
@@ -139,25 +129,6 @@ def imputation_grid(t_obs: np.ndarray, *, grid_size: int) -> np.ndarray:
     return np.linspace(EPS, upper, grid_size)
 
 
-def km_survival_curve(t_obs: np.ndarray, delta: np.ndarray, grid: np.ndarray) -> np.ndarray:
-    """Kaplan-Meier survival evaluated on ``grid``."""
-    t_obs = np.asarray(t_obs, dtype=np.float64)
-    delta = np.asarray(delta, dtype=np.float64)
-    event_times = np.sort(np.unique(t_obs[delta == 1.0]))
-    survival = 1.0
-    values = np.ones_like(grid, dtype=np.float64)
-    cursor = 0.0
-    for event_time in event_times:
-        values[(grid >= cursor) & (grid < event_time)] = survival
-        at_risk = float(np.sum(t_obs >= event_time))
-        events = float(np.sum((t_obs == event_time) & (delta == 1.0)))
-        if at_risk > 0:
-            survival *= max(0.0, 1.0 - events / at_risk)
-        cursor = event_time
-    values[grid >= cursor] = survival
-    return np.minimum.accumulate(np.clip(values, 0.0, 1.0))
-
-
 def condition_survival_curve(
     survival: np.ndarray,
     grid: np.ndarray,
@@ -166,29 +137,21 @@ def condition_survival_curve(
     condition_on_censoring: bool,
 ) -> np.ndarray:
     """Optionally convert ``S(t | X)`` to ``S(t | T > censor_time, X)``."""
-    if not condition_on_censoring:
-        return survival.astype(np.float64, copy=True)
-    s_c = float(np.interp(censor_time, grid, survival, left=1.0, right=survival[-1]))
-    conditioned = survival.astype(np.float64, copy=True) / max(s_c, 1e-8)
-    conditioned[grid <= censor_time] = 1.0
-    return np.minimum.accumulate(np.clip(conditioned, 0.0, 1.0))
+    return condition_survival_curves(
+        survival[None, :],
+        grid,
+        np.array([censor_time], dtype=np.float64),
+        condition_on_censoring=condition_on_censoring,
+    )[0]
 
 
 def median_from_survival(grid: np.ndarray, survival: np.ndarray, lower_bound: float) -> float:
     """Return median event time from a survival curve on ``grid``."""
-    eligible = (grid > lower_bound) & (survival <= 0.5)
-    if not eligible.any():
-        return float(max(lower_bound, grid[-1]))
-    hit = int(np.argmax(eligible))
-    prev = max(hit - 1, 0)
-    s0 = float(survival[prev])
-    s1 = float(survival[hit])
-    t0 = float(grid[prev])
-    t1 = float(grid[hit])
-    if s0 == s1:
-        return t1
-    weight = np.clip((0.5 - s0) / (s1 - s0), 0.0, 1.0)
-    return float(max(lower_bound, t0 + weight * (t1 - t0)))
+    return float(survival_median(
+        grid,
+        survival[None, :],
+        np.array([lower_bound], dtype=np.float64),
+    )[0])
 
 
 def sample_from_survival(
@@ -199,26 +162,13 @@ def sample_from_survival(
     n_samples: int,
 ) -> np.ndarray:
     """Sample event times from a survival curve represented on ``grid``."""
-    event_cdf = 1.0 - survival
-    draws = np.empty(n_samples, dtype=np.float32)
-    for idx in range(n_samples):
-        u = float(rng.uniform())
-        eligible = (grid > lower_bound) & (event_cdf >= u)
-        if not eligible.any():
-            draws[idx] = np.float32(max(lower_bound, grid[-1]))
-            continue
-        hit = int(np.argmax(eligible))
-        prev = max(hit - 1, 0)
-        f0 = float(event_cdf[prev])
-        f1 = float(event_cdf[hit])
-        t0 = float(grid[prev])
-        t1 = float(grid[hit])
-        if f0 == f1:
-            draws[idx] = np.float32(t1)
-        else:
-            weight = np.clip((u - f0) / (f1 - f0), 0.0, 1.0)
-            draws[idx] = np.float32(max(lower_bound, t0 + weight * (t1 - t0)))
-    return draws
+    return sample_survival_times(
+        grid,
+        survival[None, :],
+        np.array([lower_bound], dtype=np.float64),
+        rng,
+        n_samples=n_samples,
+    )[0]
 
 
 def impute_from_survival_curves(
@@ -233,18 +183,21 @@ def impute_from_survival_curves(
     rng: np.random.Generator,
 ) -> ImputationOutput:
     """Convert survival curves into median and sampled imputations."""
-    medians = np.empty(curves.shape[0], dtype=np.float32)
-    samples = np.empty((curves.shape[0], n_samples), dtype=np.float32)
-    for row_idx, curve in enumerate(curves):
-        conditioned = condition_survival_curve(
-            curve,
-            grid,
-            float(censor_times[row_idx]),
-            condition_on_censoring=condition_on_censoring,
-        )
-        lower = float(censor_times[row_idx]) if condition_on_censoring else 0.0
-        medians[row_idx] = np.float32(median_from_survival(grid, conditioned, lower))
-        samples[row_idx] = sample_from_survival(grid, conditioned, lower, rng, n_samples)
+    conditioned = condition_survival_curves(
+        curves,
+        grid,
+        censor_times,
+        condition_on_censoring=condition_on_censoring,
+    )
+    lower_bounds = np.asarray(censor_times, dtype=np.float64) if condition_on_censoring else np.zeros(len(censor_times))
+    medians = survival_median(grid, conditioned, lower_bounds)
+    samples = sample_survival_times(
+        grid,
+        conditioned,
+        lower_bounds,
+        rng,
+        n_samples=n_samples,
+    )
     return ImputationOutput(method=method, mode=mode, median=medians, samples=samples)
 
 
@@ -270,65 +223,6 @@ def km_imputation(
         condition_on_censoring=condition_on_censoring,
         n_samples=n_samples,
         rng=rng,
-    )
-
-
-def ph_negative_log_likelihood(
-    theta: np.ndarray,
-    family_key: str,
-    X: np.ndarray,
-    t: np.ndarray,
-    delta: np.ndarray,
-) -> float:
-    """Right-censored parametric PH negative log-likelihood."""
-    beta = theta[: X.shape[1]]
-    params = _unpack_params(family_key, theta[X.shape[1] :])
-    eta = np.clip(np.asarray(X, dtype=np.float64) @ beta, -20.0, 20.0)
-    h0 = np.clip(cumulative_hazard0(t, family_key, params), EPS, 1e100)
-    log_h0 = log_hazard0(t, family_key, params)
-    log_likelihood = delta * (log_h0 + eta) - h0 * np.exp(eta)
-    value = -float(np.sum(log_likelihood))
-    if not np.isfinite(value):
-        return 1e100
-    return value
-
-
-def fit_parametric_ph_mle(
-    family_key: str,
-    X: np.ndarray,
-    t: np.ndarray,
-    delta: np.ndarray,
-) -> ParametricPHEstimate:
-    """Fit a parametric PH family by censored MLE."""
-    X = np.asarray(X, dtype=np.float64)
-    t = np.asarray(t, dtype=np.float64)
-    delta = np.asarray(delta, dtype=np.float64)
-    beta0 = np.zeros(X.shape[1], dtype=np.float64)
-    median_time = float(np.median(t))
-    if family_key == "weibull":
-        baseline0 = np.array([np.log(1.2), np.log(median_time)], dtype=np.float64)
-    elif family_key == "gompertz":
-        baseline0 = np.array([np.log(1.0), np.log(0.05)], dtype=np.float64)
-    elif family_key == "loglogistic":
-        baseline0 = np.array([np.log(1.2), np.log(median_time)], dtype=np.float64)
-    elif family_key == "lognormal":
-        baseline0 = np.array([np.log(median_time), np.log(1.0)], dtype=np.float64)
-    else:
-        raise ValueError(family_key)
-
-    result = minimize(
-        ph_negative_log_likelihood,
-        np.concatenate([beta0, baseline0]),
-        args=(family_key, X, t, delta),
-        method="L-BFGS-B",
-        options={"maxiter": 700},
-    )
-    if not result.success:
-        raise RuntimeError(f"{FAMILIES[family_key].label} PH MLE failed: {result.message}")
-    theta = np.asarray(result.x, dtype=np.float64)
-    return ParametricPHEstimate(
-        beta=theta[: X.shape[1]],
-        baseline_params=_unpack_params(family_key, theta[X.shape[1] :]),
     )
 
 
@@ -448,10 +342,12 @@ def parametric_ph_real_imputation(
     condition_on_censoring: bool,
     n_samples: int,
     rng: np.random.Generator,
+    estimate: ParametricPHEstimate | None = None,
 ) -> ImputationOutput:
     """Parametric PH imputation for masked real-data holdout rows."""
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        estimate = fit_parametric_ph_mle(fit_family_key, X, t_obs, delta)
+        if estimate is None:
+            estimate = fit_parametric_ph_mle(fit_family_key, X, t_obs, delta)
         eta = np.clip(np.asarray(X[holdout_indices], dtype=np.float64) @ estimate.beta, -20.0, 20.0)
         h0 = np.clip(cumulative_hazard0(grid, fit_family_key, estimate.baseline_params), EPS, 1e100)
         curves = np.exp(-np.exp(eta)[:, None] * h0[None, :])
@@ -625,7 +521,10 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
     condition_modes = (True, False) if config.include_unconditional else (True,)
     for dataset_idx, dataset in enumerate(datasets):
         data = load_real_survival_benchmark(dataset, data_dir=config.data_dir)
-        X, feature_names = encode_real_features(data.X)
+        X, feature_names = encode_real_features(
+            data.X,
+            categorical_columns=tuple(data.metadata.get("categorical_cols", ())),
+        )
         time = np.asarray(data.time, dtype=np.float64)
         event = np.asarray(data.event, dtype=np.float64)
         natural_censored_count = int(np.sum(event == 0.0))
@@ -662,6 +561,18 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
             grid = imputation_grid(t_masked, grid_size=config.grid_size)
             event_rate_masked = float(delta_masked.mean())
             context_event_count = int(delta_masked.sum())
+            parametric_estimates: dict[str, ParametricPHEstimate] = {}
+            parametric_failures: dict[str, str] = {}
+            for fit_family in config.parametric_fit_families:
+                try:
+                    parametric_estimates[fit_family] = fit_parametric_ph_mle(
+                        fit_family,
+                        X,
+                        t_masked,
+                        delta_masked,
+                    )
+                except Exception as exc:
+                    parametric_failures[fit_family] = str(exc)
 
             for condition_on_censoring in condition_modes:
                 mode = _mode_name(condition_on_censoring)
@@ -690,7 +601,23 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                 )
 
                 for fit_family in config.parametric_fit_families:
-                    try:
+                    failure_message = parametric_failures.get(fit_family)
+                    if failure_message is not None:
+                        rows.append(
+                            failure_row(
+                                dataset=dataset,
+                                trial=trial,
+                                method=f"{fit_family}_ph_mle",
+                                mode=mode,
+                                message=failure_message,
+                                event_rate_original=event_rate_original,
+                                event_rate_masked=event_rate_masked,
+                                natural_censored_count=natural_censored_count,
+                                holdout_count=int(holdout_indices.size),
+                                context_event_count=context_event_count,
+                            )
+                        )
+                    else:
                         output = parametric_ph_real_imputation(
                             X,
                             t_masked,
@@ -701,23 +628,8 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                             condition_on_censoring=condition_on_censoring,
                             n_samples=config.n_imputation_samples,
                             rng=rng,
+                            estimate=parametric_estimates[fit_family],
                         )
-                    except Exception as exc:
-                        rows.append(
-                            failure_row(
-                                dataset=dataset,
-                                trial=trial,
-                                method=f"{fit_family}_ph_mle",
-                                mode=mode,
-                                message=str(exc),
-                                event_rate_original=event_rate_original,
-                                event_rate_masked=event_rate_masked,
-                                natural_censored_count=natural_censored_count,
-                                holdout_count=int(holdout_indices.size),
-                                context_event_count=context_event_count,
-                            )
-                        )
-                    else:
                         rows.append(
                             score_real_imputation(
                                 output,

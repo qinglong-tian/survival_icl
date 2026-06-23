@@ -8,14 +8,12 @@ from typing import Literal, Sequence
 
 import numpy as np
 
+from tabicl.survival._curves import (
+    sample_survival_times,
+    survival_median,
+    survival_restricted_mean,
+)
 from tabicl.survival._sklearn import TabICLSurvivalEstimator, _as_1d_float
-
-
-def _trapezoid(y, x, *, axis: int = -1):
-    rule = getattr(np, "trapezoid", None)
-    if rule is None:
-        rule = np.trapz
-    return rule(y, x, axis=axis)
 
 
 @dataclass
@@ -42,83 +40,6 @@ def _take_rows(X, indices: np.ndarray):
     if hasattr(X, "iloc"):
         return X.iloc[indices]
     return np.asarray(X)[indices]
-
-
-def _survival_median(
-    grid: np.ndarray,
-    curves: np.ndarray,
-    lower_bounds: np.ndarray,
-) -> np.ndarray:
-    medians = np.empty(curves.shape[0], dtype=np.float32)
-    for row_idx, survival in enumerate(curves):
-        lower = lower_bounds[row_idx]
-        after = grid > lower
-        eligible = after & (survival <= 0.5)
-        if not eligible.any():
-            medians[row_idx] = np.float32(max(lower, grid[-1]))
-            continue
-        hit = int(np.argmax(eligible))
-        prev = max(hit - 1, 0)
-        s0 = float(survival[prev])
-        s1 = float(survival[hit])
-        t0 = float(grid[prev])
-        t1 = float(grid[hit])
-        if s0 == s1:
-            medians[row_idx] = np.float32(t1)
-        else:
-            weight = (0.5 - s0) / (s1 - s0)
-            medians[row_idx] = np.float32(t0 + np.clip(weight, 0.0, 1.0) * (t1 - t0))
-    return np.maximum(medians, lower_bounds).astype(np.float32)
-
-
-def _survival_restricted_mean(
-    grid: np.ndarray,
-    curves: np.ndarray,
-    lower_bounds: np.ndarray,
-) -> np.ndarray:
-    means = np.empty(curves.shape[0], dtype=np.float32)
-    for row_idx, survival in enumerate(curves):
-        lower = float(lower_bounds[row_idx])
-        post_grid = grid[grid > lower]
-        if post_grid.size == 0:
-            means[row_idx] = np.float32(lower)
-            continue
-        s_lower = float(np.interp(lower, grid, survival, left=1.0, right=survival[-1]))
-        eval_grid = np.concatenate([[lower], post_grid])
-        eval_survival = np.concatenate([[s_lower], survival[grid > lower].astype(np.float64)])
-        restricted_residual = _trapezoid(eval_survival, eval_grid)
-        means[row_idx] = np.float32(lower + restricted_residual)
-    return np.maximum(means, lower_bounds).astype(np.float32)
-
-
-def _sample_survival_times(
-    grid: np.ndarray,
-    curves: np.ndarray,
-    lower_bounds: np.ndarray,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    samples = np.empty(curves.shape[0], dtype=np.float32)
-    for row_idx, survival in enumerate(curves):
-        lower = float(lower_bounds[row_idx])
-        u = float(rng.uniform())
-        event_cdf = 1.0 - survival
-        after = grid > lower
-        eligible = after & (event_cdf >= u)
-        if not eligible.any():
-            samples[row_idx] = np.float32(max(lower, grid[-1]))
-            continue
-        hit = int(np.argmax(eligible))
-        prev = max(hit - 1, 0)
-        f0 = float(event_cdf[prev])
-        f1 = float(event_cdf[hit])
-        t0 = float(grid[prev])
-        t1 = float(grid[hit])
-        if f0 == f1:
-            samples[row_idx] = np.float32(t1)
-        else:
-            weight = (u - f0) / (f1 - f0)
-            samples[row_idx] = np.float32(t0 + np.clip(weight, 0.0, 1.0) * (t1 - t0))
-    return np.maximum(samples, lower_bounds).astype(np.float32)
 
 
 def impute_censored_survival_times(
@@ -228,15 +149,18 @@ def impute_censored_survival_times(
     else:
         lower_bounds = np.zeros_like(censor_times, dtype=np.float32)
     if hard_method == "median":
-        hard_times = _survival_median(grid, curves, lower_bounds)
+        hard_times = survival_median(grid, curves, lower_bounds)
     else:
-        hard_times = _survival_restricted_mean(grid, curves, lower_bounds)
+        hard_times = survival_restricted_mean(grid, curves, lower_bounds)
 
     rng = random_state if isinstance(random_state, np.random.Generator) else np.random.default_rng(random_state)
-    soft_times = np.column_stack([
-        _sample_survival_times(grid, curves, lower_bounds, rng)
-        for _ in range(n_soft_samples)
-    ]).astype(np.float32)
+    soft_times = sample_survival_times(
+        grid,
+        curves,
+        lower_bounds,
+        rng,
+        n_samples=n_soft_samples,
+    )
 
     completed_hard = t_arr.copy()
     completed_hard[censored_indices] = hard_times

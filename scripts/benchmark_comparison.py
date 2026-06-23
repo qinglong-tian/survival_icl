@@ -21,9 +21,20 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-from scipy.special import ndtr as norm_cdf
-from scipy.special import ndtri as norm_ppf
+
+from tabicl.survival._curves import trapezoid as _trapezoid
+from tabicl.survival._parametric_ph import (
+    EPS,
+    FAMILIES,
+    FAMILY_KEYS,
+    PHFamily,
+    baseline_survival,
+    cumulative_hazard0,
+    fit_parametric_ph_mle,
+    inverse_cumulative_hazard0,
+    log_hazard0,
+    unpack_params as _unpack_params,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,14 +47,6 @@ DEFAULT_N_CONTEXT = 512
 DEFAULT_N_TRIALS = 5
 DEFAULT_GRID_SIZE = 100
 DEFAULT_BETA = np.array([0.8, -0.6, 0.45, 0.0, 0.25], dtype=np.float64)
-EPS = 1e-12
-
-
-def _trapezoid(y, x, *, axis: int = -1):
-    rule = getattr(np, "trapezoid", None)
-    if rule is None:
-        rule = np.trapz
-    return rule(y, x, axis=axis)
 
 
 @dataclass(frozen=True)
@@ -67,30 +70,6 @@ class BenchmarkConfig:
         return DEFAULT_BETA[: self.n_features]
 
 
-@dataclass(frozen=True)
-class PHFamily:
-    """Baseline family for proportional-hazards generation and fitting."""
-
-    key: str
-    label: str
-    param_names: tuple[str, ...]
-    true_params: dict[str, float]
-
-
-FAMILIES: dict[str, PHFamily] = {
-    "weibull": PHFamily("weibull", "Weibull", ("log_shape", "log_scale"), {"shape": 1.6, "scale": 10.0}),
-    "gompertz": PHFamily("gompertz", "Gompertz", ("log_rate", "log_gamma"), {"rate": 1.0, "gamma": 0.15}),
-    "loglogistic": PHFamily(
-        "loglogistic",
-        "LogLogistic",
-        ("log_shape", "log_scale"),
-        {"shape": 1.8, "scale": 1.0},
-    ),
-    "lognormal": PHFamily("lognormal", "LogNormal", ("mu", "log_sigma"), {"mu": 0.0, "sigma": 0.8}),
-}
-FAMILY_KEYS = tuple(FAMILIES)
-
-
 @dataclass
 class SyntheticData:
     """One generated train/query survival task."""
@@ -112,90 +91,6 @@ class FittedModel:
     specification: str
     risk: Callable[[np.ndarray], np.ndarray]
     survival: Callable[[np.ndarray, np.ndarray], np.ndarray]
-
-
-def _clip_time(t: np.ndarray) -> np.ndarray:
-    return np.maximum(np.asarray(t, dtype=np.float64), EPS)
-
-
-def _unpack_params(family_key: str, theta: np.ndarray | None = None, params: dict[str, float] | None = None) -> dict[str, float]:
-    if params is not None:
-        return dict(params)
-    if theta is None:
-        raise ValueError("Either theta or params must be provided.")
-    if family_key == "weibull":
-        return {"shape": float(np.exp(theta[0])), "scale": float(np.exp(theta[1]))}
-    if family_key == "gompertz":
-        return {"rate": float(np.exp(theta[0])), "gamma": float(np.exp(theta[1]))}
-    if family_key == "loglogistic":
-        return {"shape": float(np.exp(theta[0])), "scale": float(np.exp(theta[1]))}
-    if family_key == "lognormal":
-        return {"mu": float(theta[0]), "sigma": float(np.exp(theta[1]))}
-    raise ValueError(family_key)
-
-
-def cumulative_hazard0(t: np.ndarray, family_key: str, params: dict[str, float]) -> np.ndarray:
-    """Return baseline cumulative hazard ``H0(t)``."""
-
-    t = _clip_time(t)
-    if family_key == "weibull":
-        return (t / params["scale"]) ** params["shape"]
-    if family_key == "gompertz":
-        gamma = params["gamma"]
-        return params["rate"] * np.expm1(np.minimum(gamma * t, 50.0)) / gamma
-    if family_key == "loglogistic":
-        return np.log1p((t / params["scale"]) ** params["shape"])
-    if family_key == "lognormal":
-        z = (params["mu"] - np.log(t)) / params["sigma"]
-        return -np.log(np.clip(norm_cdf(z), EPS, 1.0))
-    raise ValueError(family_key)
-
-
-def log_hazard0(t: np.ndarray, family_key: str, params: dict[str, float]) -> np.ndarray:
-    """Return baseline log-hazard ``log h0(t)``."""
-
-    t = _clip_time(t)
-    if family_key == "weibull":
-        shape = params["shape"]
-        scale = params["scale"]
-        return np.log(shape) - np.log(scale) + (shape - 1.0) * (np.log(t) - np.log(scale))
-    if family_key == "gompertz":
-        return np.log(params["rate"]) + np.minimum(params["gamma"] * t, 50.0)
-    if family_key == "loglogistic":
-        shape = params["shape"]
-        scale = params["scale"]
-        z = (t / scale) ** shape
-        return np.log(shape) - np.log(scale) + (shape - 1.0) * (np.log(t) - np.log(scale)) - np.log1p(z)
-    if family_key == "lognormal":
-        mu = params["mu"]
-        sigma = params["sigma"]
-        z = (np.log(t) - mu) / sigma
-        log_pdf = -np.log(t) - np.log(sigma) - 0.5 * np.log(2.0 * np.pi) - 0.5 * z**2
-        log_surv = -cumulative_hazard0(t, family_key, params)
-        return log_pdf - log_surv
-    raise ValueError(family_key)
-
-
-def inverse_cumulative_hazard0(h: np.ndarray, family_key: str, params: dict[str, float]) -> np.ndarray:
-    """Return ``H0^{-1}(h)`` for synthetic PH sampling."""
-
-    h = np.maximum(np.asarray(h, dtype=np.float64), EPS)
-    if family_key == "weibull":
-        return params["scale"] * h ** (1.0 / params["shape"])
-    if family_key == "gompertz":
-        inner = 1.0 + params["gamma"] * h / params["rate"]
-        return np.log(np.maximum(inner, 1.0 + EPS)) / params["gamma"]
-    if family_key == "loglogistic":
-        return params["scale"] * np.expm1(np.minimum(h, 50.0)) ** (1.0 / params["shape"])
-    if family_key == "lognormal":
-        s0 = np.exp(-np.minimum(h, 50.0))
-        z = norm_ppf(np.clip(s0, 1e-10, 1.0 - 1e-10))
-        return np.exp(params["mu"] - params["sigma"] * z)
-    raise ValueError(family_key)
-
-
-def baseline_survival(t: np.ndarray, family_key: str, params: dict[str, float]) -> np.ndarray:
-    return np.exp(-cumulative_hazard0(t, family_key, params))
 
 
 def generate_ph_data(family_key: str, config: BenchmarkConfig, seed: int) -> SyntheticData:
@@ -228,19 +123,6 @@ def generate_ph_data(family_key: str, config: BenchmarkConfig, seed: int) -> Syn
     )
 
 
-def _negative_log_likelihood(theta: np.ndarray, family_key: str, X: np.ndarray, t: np.ndarray, delta: np.ndarray) -> float:
-    beta = theta[: X.shape[1]]
-    params = _unpack_params(family_key, theta[X.shape[1] :])
-    eta = np.clip(X @ beta, -20.0, 20.0)
-    h0 = np.clip(cumulative_hazard0(t, family_key, params), EPS, 1e100)
-    log_h0 = log_hazard0(t, family_key, params)
-    ll = delta * (log_h0 + eta) - h0 * np.exp(eta)
-    value = -float(np.sum(ll))
-    if not np.isfinite(value):
-        return 1e100
-    return value + 1e-4 * float(np.sum(beta**2))
-
-
 def fit_parametric_ph(
     family_key: str,
     X_train: np.ndarray,
@@ -251,28 +133,16 @@ def fit_parametric_ph(
     """Fit one parametric PH family by censored maximum likelihood."""
 
     family = FAMILIES[family_key]
-    beta0 = np.zeros(X_train.shape[1], dtype=np.float64)
-    if family_key == "weibull":
-        family0 = np.array([np.log(1.2), np.log(np.median(t_train))])
-    elif family_key == "gompertz":
-        family0 = np.array([np.log(1.0), np.log(0.05)])
-    elif family_key == "loglogistic":
-        family0 = np.array([np.log(1.2), np.log(np.median(t_train))])
-    else:
-        family0 = np.array([np.log(np.median(t_train)), np.log(1.0)])
-    theta0 = np.concatenate([beta0, family0])
-    result = minimize(
-        _negative_log_likelihood,
-        theta0,
-        args=(family_key, np.asarray(X_train, dtype=np.float64), t_train, delta_train),
-        method="L-BFGS-B",
-        options={"maxiter": 500},
+    estimate = fit_parametric_ph_mle(
+        family_key,
+        X_train,
+        t_train,
+        delta_train,
+        maxiter=500,
+        l2_penalty=1e-4,
     )
-    if not result.success:
-        raise RuntimeError(f"{family.label} PH fit failed: {result.message}")
-
-    beta_hat = result.x[: X_train.shape[1]]
-    params_hat = _unpack_params(family_key, result.x[X_train.shape[1] :])
+    beta_hat = estimate.beta
+    params_hat = estimate.baseline_params
     specification = "correct" if family_key == data_family_key else "misspecified"
 
     def risk(X_query: np.ndarray) -> np.ndarray:
