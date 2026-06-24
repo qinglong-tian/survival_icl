@@ -6,6 +6,21 @@ censored rows.  This benchmark therefore creates a verifiable holdout task:
 observed-event rows are randomly selected, artificially censored before their
 known event time, and then imputed from the masked dataset.  Scores are
 computed against the original observed event time of those masked rows.
+
+**Behavior notes (stable contract):**
+
+- Imputation uses the **unconditional** ``S(t | X)`` survival curve by default.
+  Conditional ``S(t | T > censor_time, X)`` imputation is opt-in via
+  ``--include-conditional``.  The two modes are not directly comparable because
+  conditional imputation constrains estimates to be at least the artificial
+  censoring time while the true event occurred strictly after it.
+
+- The default trial count is **30** (``--n-trials 30``).  Results from runs
+  with fewer trials are not directly comparable to the default.
+
+- Historical runs that included both modes (``conditional`` and
+  ``unconditional``) are not directly comparable to the current
+  unconditional-only default unless ``--include-conditional`` is re-enabled.
 """
 
 from __future__ import annotations
@@ -68,7 +83,7 @@ class RealImputationQualityConfig:
 
     datasets: tuple[str, ...] = ()
     data_dir: Path = DEFAULT_REAL_SURVIVAL_DATA_DIR
-    n_trials: int = 3
+    n_trials: int = 30
     seed: int = 20260623
     holdout_fraction: float = 0.25
     max_holdout_events: int = 64
@@ -85,7 +100,7 @@ class RealImputationQualityConfig:
     query_batch_size: int = 64
     max_context_size: int | None = None
     skip_tabicl: bool = False
-    include_unconditional: bool = True
+    include_conditional: bool = False
 
 
 @dataclass
@@ -518,7 +533,7 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
         )
 
     rows: list[dict] = []
-    condition_modes = (True, False) if config.include_unconditional else (True,)
+    condition_modes = (False, True) if config.include_conditional else (False,)
     for dataset_idx, dataset in enumerate(datasets):
         data = load_real_survival_benchmark(dataset, data_dir=config.data_dir)
         X, feature_names = encode_real_features(
@@ -574,8 +589,9 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                 except Exception as exc:
                     parametric_failures[fit_family] = str(exc)
 
-            for condition_on_censoring in condition_modes:
+            for mode_idx, condition_on_censoring in enumerate(condition_modes):
                 mode = _mode_name(condition_on_censoring)
+                mode_rng = rng if mode_idx == 0 else np.random.default_rng(config.seed + 200_003 * dataset_idx + trial)
                 km_output = km_imputation(
                     t_masked,
                     delta_masked,
@@ -583,7 +599,7 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                     grid,
                     condition_on_censoring=condition_on_censoring,
                     n_samples=config.n_imputation_samples,
-                    rng=rng,
+                    rng=mode_rng,
                 )
                 rows.append(
                     score_real_imputation(
@@ -627,7 +643,7 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                             fit_family_key=fit_family,
                             condition_on_censoring=condition_on_censoring,
                             n_samples=config.n_imputation_samples,
-                            rng=rng,
+                            rng=mode_rng,
                             estimate=parametric_estimates[fit_family],
                         )
                         rows.append(
@@ -746,7 +762,7 @@ def main() -> None:
         help="Comma-separated real benchmark names. Empty means all registered datasets.",
     )
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_REAL_SURVIVAL_DATA_DIR)
-    parser.add_argument("--n-trials", type=int, default=3)
+    parser.add_argument("--n-trials", type=int, default=30)
     parser.add_argument("--seed", type=int, default=20260623)
     parser.add_argument("--holdout-fraction", type=float, default=0.25)
     parser.add_argument("--max-holdout-events", type=int, default=64)
@@ -767,7 +783,11 @@ def main() -> None:
     parser.add_argument("--query-batch-size", type=int, default=64)
     parser.add_argument("--max-context-size", type=int, default=None)
     parser.add_argument("--skip-tabicl", action="store_true")
-    parser.add_argument("--conditional-only", action="store_true")
+    parser.add_argument(
+        "--include-conditional", action="store_true",
+        help="Include conditional S(t | T > censor_time, X) imputation alongside the unconditional default. "
+             "Default output is unconditional only; this flag adds a separate conditional mode for comparison.",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
 
@@ -791,7 +811,7 @@ def main() -> None:
         query_batch_size=args.query_batch_size,
         max_context_size=args.max_context_size,
         skip_tabicl=args.skip_tabicl,
-        include_unconditional=not args.conditional_only,
+        include_conditional=args.include_conditional,
     )
     results = run_real_imputation_quality_comparison(config)
     summary = summarize_real_quality(results)

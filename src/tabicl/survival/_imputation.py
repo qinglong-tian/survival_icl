@@ -65,11 +65,11 @@ def impute_censored_survival_times(
     censored unit's own ``(t, delta=0)`` observation is present in the prompt
     while its event time is queried.
 
-    When ``condition_on_censoring=True`` (default), hard and soft imputations
-    use ``S(t | T > censor_time, X)`` and are constrained to be at least the
-    observed censoring time.  When ``False``, they use the unconditional
-    ``S(t | X)`` predicted by the model; imputed event times may then be earlier
-    than the observed censoring time.
+    By default, hard and soft imputations use ``S(t | T > censor_time, X)`` and
+    are constrained to be at least the observed censoring time.  When
+    ``condition_on_censoring=False``, they use the unconditional ``S(t | X)``
+    predicted by the model; imputed event times may then be earlier than the
+    observed censoring time.
 
     Parameters
     ----------
@@ -120,8 +120,8 @@ def impute_censored_survival_times(
             censored_indices=censored_indices,
             hard_times=np.empty(0, dtype=np.float32),
             soft_times=empty_soft,
-            completed_hard_times=t_arr.copy(),
-            completed_soft_times=np.tile(t_arr[:, None], (1, n_soft_samples)),
+            completed_hard_times=t_arr.copy().astype(np.float32),
+            completed_soft_times=np.tile(t_arr[:, None], (1, n_soft_samples)).astype(np.float32),
             time_grid=np.empty(0, dtype=np.float64),
             conditional_survival=np.empty((0, 0), dtype=np.float32),
             hard_method=hard_method,
@@ -162,7 +162,7 @@ def impute_censored_survival_times(
         n_samples=n_soft_samples,
     )
 
-    completed_hard = t_arr.copy()
+    completed_hard = t_arr.copy().astype(np.float32)
     completed_hard[censored_indices] = hard_times
     completed_soft = np.tile(t_arr[:, None], (1, n_soft_samples)).astype(np.float32)
     completed_soft[censored_indices] = soft_times

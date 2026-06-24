@@ -137,6 +137,7 @@ def test_impute_censored_survival_times_returns_completed_vectors(tmp_path):
     )
 
     assert result.censored_indices.tolist() == [1, 4, 6]
+    assert result.condition_on_censoring is True
     assert result.hard_times.shape == (3,)
     assert result.soft_times.shape == (3, 3)
     assert result.completed_hard_times.shape == t.shape
@@ -175,6 +176,7 @@ def test_impute_censored_survival_times_supports_mean_and_reproducibility(tmp_pa
     )
 
     assert first.hard_method == "mean"
+    assert first.condition_on_censoring is True
     assert np.all(first.hard_times >= t[first.censored_indices])
     assert np.allclose(first.soft_times, second.soft_times)
 
@@ -204,6 +206,30 @@ def test_impute_censored_survival_times_supports_unconditional_mode(tmp_path):
     assert np.isfinite(result.soft_times).all()
 
 
+def test_impute_censored_survival_times_supports_conditional_mode(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(9).normal(size=(7, 2)).astype(np.float32)
+    t = np.arange(1.0, 8.0, dtype=np.float32)
+    delta = np.array([1, 0, 1, 0, 1, 1, 0], dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=3,
+        random_state=42,
+        condition_on_censoring=True,
+    )
+
+    assert result.condition_on_censoring is True
+    assert result.hard_times.shape == (3,)
+    assert result.soft_times.shape == (3, 3)
+    assert np.all(result.hard_times >= t[result.censored_indices])
+    assert np.all(result.soft_times >= t[result.censored_indices, None])
+
+
 def test_impute_censored_survival_times_no_censored_rows(tmp_path):
     checkpoint = tmp_path / "step-0.ckpt"
     tiny_survival_checkpoint(checkpoint)
@@ -224,3 +250,46 @@ def test_impute_censored_survival_times_no_censored_rows(tmp_path):
     assert result.soft_times.shape == (0, 2)
     assert np.allclose(result.completed_hard_times, t)
     assert np.allclose(result.completed_soft_times, t[:, None])
+
+
+def test_impute_censored_survival_times_no_censored_dtypes(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(7).normal(size=(5, 2)).astype(np.float32)
+    t = np.arange(1.0, 6.0, dtype=np.float32)
+    delta = np.ones(5, dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=2,
+        condition_on_censoring=False,
+    )
+
+    assert result.completed_hard_times.dtype == np.float32
+    assert result.completed_soft_times.dtype == np.float32
+    assert np.allclose(result.completed_hard_times, t)
+
+
+def test_impute_censored_survival_times_censored_dtypes(tmp_path):
+    checkpoint = tmp_path / "step-0.ckpt"
+    tiny_survival_checkpoint(checkpoint)
+    X = np.random.default_rng(8).normal(size=(7, 2)).astype(np.float32)
+    t = np.arange(1.0, 8.0, dtype=np.float32)
+    delta = np.array([1, 0, 1, 0, 1, 1, 0], dtype=np.float32)
+
+    result = impute_censored_survival_times(
+        checkpoint,
+        X,
+        t,
+        delta,
+        n_soft_samples=2,
+        random_state=10,
+    )
+
+    assert result.completed_hard_times.dtype == np.float32
+    assert result.completed_soft_times.dtype == np.float32
+    assert result.hard_times.dtype == np.float32
+    assert result.soft_times.dtype == np.float32
