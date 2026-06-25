@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _load_real_quality_module():
@@ -22,6 +23,11 @@ def _load_real_quality_module():
 
 
 real_quality = _load_real_quality_module()
+HAS_LIFELINES = importlib.util.find_spec("lifelines") is not None
+
+
+def _cox_enabled_methods() -> set[str]:
+    return {"kaplan_meier", "cox_ph_breslow"} if HAS_LIFELINES else {"kaplan_meier"}
 
 
 def test_artificial_censor_times_are_strictly_before_events():
@@ -45,7 +51,7 @@ def test_artificial_censor_times_are_strictly_before_events():
 
 def test_choose_holdout_event_indices_leaves_context_events():
     rng = np.random.default_rng(123)
-    event = np.r_[np.ones(20), np.zeros(10)]
+    event = np.r_[np.full(20, 0.99999994), np.zeros(10)]
 
     holdout = real_quality.choose_holdout_event_indices(
         event,
@@ -57,23 +63,24 @@ def test_choose_holdout_event_indices_leaves_context_events():
     )
 
     assert holdout.size == 8
-    assert np.all(event[holdout] == 1.0)
-    assert int(event.sum()) - holdout.size >= 10
+    assert np.all(event[holdout] > 0.5)
+    assert int(np.sum(event > 0.5)) - holdout.size >= 10
 
 
 def test_real_imputation_quality_smoke_with_local_cache(tmp_path):
     processed = tmp_path / "processed"
     processed.mkdir()
-    n = 32
-    time = np.linspace(2.0, 33.0, n)
-    event = np.ones(n, dtype=int)
-    event[-8:] = 0
+    n = 48
+    rng = np.random.default_rng(10)
+    time = rng.uniform(2.0, 33.0, n)
+    event = (rng.uniform(size=n) < 0.75).astype(int)
     frame = pd.DataFrame(
         {
             "time": time,
             "event": event,
-            "x": np.linspace(-1.0, 1.0, n),
-            "group": np.where(np.arange(n) % 2 == 0, "a", "b"),
+            "x": rng.normal(size=n),
+            "z": rng.normal(size=n),
+            "group": np.where(rng.uniform(size=n) < 0.5, "a", "b"),
         }
     )
     frame.to_csv(processed / "veteran.csv", index=False)
@@ -88,13 +95,14 @@ def test_real_imputation_quality_smoke_with_local_cache(tmp_path):
         grid_size=32,
         n_imputation_samples=8,
         parametric_fit_families=(),
+        skip_cox_ph=not HAS_LIFELINES,
         skip_tabicl=True,
     )
     results = real_quality.run_real_imputation_quality_comparison(config)
     summary = real_quality.summarize_real_quality(results)
     ranks = real_quality.summarize_real_ranks(results)
 
-    assert set(results["method"]) == {"kaplan_meier"}
+    assert set(results["method"]) == _cox_enabled_methods()
     assert set(results["mode"]) == {"unconditional"}
     assert np.all(results["status"] == "ok")
     assert np.all(np.isfinite(results["median_log_mae"]))
@@ -107,6 +115,45 @@ def test_real_imputation_quality_smoke_with_local_cache(tmp_path):
 def test_real_imputation_quality_smoke_with_conditional(tmp_path):
     processed = tmp_path / "processed"
     processed.mkdir()
+    n = 48
+    rng = np.random.default_rng(11)
+    time = rng.uniform(2.0, 33.0, n)
+    event = (rng.uniform(size=n) < 0.75).astype(int)
+    frame = pd.DataFrame(
+        {
+            "time": time,
+            "event": event,
+            "x": rng.normal(size=n),
+            "z": rng.normal(size=n),
+            "group": np.where(rng.uniform(size=n) < 0.5, "a", "b"),
+        }
+    )
+    frame.to_csv(processed / "veteran.csv", index=False)
+
+    config = real_quality.RealImputationQualityConfig(
+        datasets=("veteran",),
+        data_dir=tmp_path,
+        n_trials=1,
+        holdout_fraction=0.25,
+        min_holdout_events=4,
+        min_context_events=10,
+        grid_size=32,
+        n_imputation_samples=8,
+        parametric_fit_families=(),
+        skip_cox_ph=not HAS_LIFELINES,
+        skip_tabicl=True,
+        include_conditional=True,
+    )
+    results = real_quality.run_real_imputation_quality_comparison(config)
+
+    assert set(results["method"]) == _cox_enabled_methods()
+    assert set(results["mode"]) == {"conditional", "unconditional"}
+    assert np.all(results["status"] == "ok")
+
+
+def test_real_imputation_quality_can_skip_cox_ph(tmp_path):
+    processed = tmp_path / "processed"
+    processed.mkdir()
     n = 32
     time = np.linspace(2.0, 33.0, n)
     event = np.ones(n, dtype=int)
@@ -131,13 +178,65 @@ def test_real_imputation_quality_smoke_with_conditional(tmp_path):
         grid_size=32,
         n_imputation_samples=8,
         parametric_fit_families=(),
+        skip_cox_ph=True,
         skip_tabicl=True,
-        include_conditional=True,
     )
     results = real_quality.run_real_imputation_quality_comparison(config)
 
-    assert set(results["mode"]) == {"conditional", "unconditional"}
+    assert set(results["method"]) == {"kaplan_meier"}
     assert np.all(results["status"] == "ok")
+
+
+def test_nonfinite_survival_curves_raise():
+    with pytest.raises(ValueError, match="non-finite"):
+        real_quality.impute_from_survival_curves(
+            method="bad_method",
+            mode="unconditional",
+            grid=np.array([1.0, 2.0, 3.0], dtype=float),
+            curves=np.array([[1.0, np.nan, 0.5]], dtype=float),
+            censor_times=np.array([0.5], dtype=float),
+            condition_on_censoring=False,
+            n_samples=2,
+            rng=np.random.default_rng(123),
+        )
+
+
+def test_critical_fit_errors_propagate(tmp_path, monkeypatch):
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    n = 32
+    time = np.linspace(2.0, 33.0, n)
+    event = np.ones(n, dtype=int)
+    event[-8:] = 0
+    frame = pd.DataFrame(
+        {
+            "time": time,
+            "event": event,
+            "x": np.linspace(-1.0, 1.0, n),
+        }
+    )
+    frame.to_csv(processed / "veteran.csv", index=False)
+
+    def raise_memory_error(*args, **kwargs):
+        raise MemoryError
+
+    monkeypatch.setattr(real_quality, "fit_parametric_ph_mle", raise_memory_error)
+    config = real_quality.RealImputationQualityConfig(
+        datasets=("veteran",),
+        data_dir=tmp_path,
+        n_trials=1,
+        holdout_fraction=0.25,
+        min_holdout_events=4,
+        min_context_events=10,
+        grid_size=32,
+        n_imputation_samples=8,
+        parametric_fit_families=("weibull",),
+        skip_cox_ph=True,
+        skip_tabicl=True,
+    )
+
+    with pytest.raises(MemoryError):
+        real_quality.run_real_imputation_quality_comparison(config)
 
 
 def test_single_mode_summary_and_ranks_are_valid():

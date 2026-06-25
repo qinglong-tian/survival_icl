@@ -31,6 +31,19 @@ class ParametricPHEstimate:
     baseline_params: dict[str, float]
 
 
+@dataclass
+class CoxPHEstimate:
+    """Fitted semi-parametric Cox PH model state."""
+
+    beta: np.ndarray
+    baseline_times: np.ndarray
+    baseline_cumulative_hazard: np.ndarray
+
+
+class PHFitError(RuntimeError):
+    """Recoverable PH model fitting failure."""
+
+
 FAMILIES: dict[str, PHFamily] = {
     "weibull": PHFamily("weibull", "Weibull", ("log_shape", "log_scale"), {"shape": 1.6, "scale": 10.0}),
     "gompertz": PHFamily("gompertz", "Gompertz", ("log_rate", "log_gamma"), {"rate": 1.0, "gamma": 0.15}),
@@ -47,6 +60,25 @@ FAMILY_KEYS = tuple(FAMILIES)
 
 def _clip_time(t: np.ndarray) -> np.ndarray:
     return np.maximum(np.asarray(t, dtype=np.float64), EPS)
+
+
+def _validate_ph_inputs(X: np.ndarray, t: np.ndarray, delta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    X = np.asarray(X, dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
+    delta = np.asarray(delta, dtype=np.float64)
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D feature matrix.")
+    if t.shape != delta.shape or t.shape[0] != X.shape[0]:
+        raise ValueError("X, t, and delta have incompatible shapes.")
+    if not np.isfinite(X).all():
+        raise ValueError("X must contain only finite values.")
+    if not np.isfinite(t).all() or np.any(t <= 0.0):
+        raise ValueError("t must contain only finite, positive times.")
+    if not np.isfinite(delta).all():
+        raise ValueError("delta must contain only finite values.")
+    if np.sum(delta > 0.5) < 1:
+        raise ValueError("PH fitting requires at least one observed event.")
+    return X, t, delta
 
 
 def unpack_params(
@@ -181,9 +213,7 @@ def fit_parametric_ph_mle(
     l2_penalty: float = 0.0,
 ) -> ParametricPHEstimate:
     """Fit a parametric PH family by censored maximum likelihood."""
-    X = np.asarray(X, dtype=np.float64)
-    t = np.asarray(t, dtype=np.float64)
-    delta = np.asarray(delta, dtype=np.float64)
+    X, t, delta = _validate_ph_inputs(X, t, delta)
     result = minimize(
         lambda theta, fam, X_arg, t_arg, delta_arg: ph_negative_log_likelihood(
             theta,
@@ -199,9 +229,78 @@ def fit_parametric_ph_mle(
         options={"maxiter": maxiter},
     )
     if not result.success:
-        raise RuntimeError(f"{FAMILIES[family_key].label} PH MLE failed: {result.message}")
+        raise PHFitError(f"{FAMILIES[family_key].label} PH MLE failed: {result.message}")
     theta = np.asarray(result.x, dtype=np.float64)
+    if not np.isfinite(theta).all():
+        raise PHFitError(f"{FAMILIES[family_key].label} PH MLE produced non-finite parameters.")
     return ParametricPHEstimate(
         beta=theta[: X.shape[1]],
         baseline_params=unpack_params(family_key, theta[X.shape[1] :]),
     )
+
+
+def fit_cox_ph_breslow(
+    X: np.ndarray,
+    t: np.ndarray,
+    delta: np.ndarray,
+    *,
+    penalizer: float = 1e-6,
+) -> CoxPHEstimate:
+    """Fit a Cox PH model with Breslow nonparametric baseline hazard."""
+    import warnings
+
+    import pandas as pd
+    from lifelines import CoxPHFitter
+    from lifelines.exceptions import ConvergenceError, ConvergenceWarning
+
+    X, t, delta = _validate_ph_inputs(X, t, delta)
+
+    feature_names = [f"x{i}" for i in range(X.shape[1])]
+    frame = pd.DataFrame(X, columns=feature_names)
+    frame["time"] = _clip_time(t)
+    frame["event"] = delta > 0.5
+
+    fitter = CoxPHFitter(
+        baseline_estimation_method="breslow",
+        penalizer=penalizer,
+    )
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            fitter.fit(frame, duration_col="time", event_col="event")
+    except (ConvergenceError, ConvergenceWarning) as exc:
+        raise PHFitError(f"Cox PH fit failed to converge: {exc}") from exc
+
+    baseline = fitter.baseline_cumulative_hazard_
+    if baseline.shape[1] != 1:
+        raise PHFitError(
+            f"Cox PH fit produced {baseline.shape[1]} baseline hazard columns; expected exactly one."
+        )
+    baseline_times = baseline.index.to_numpy(dtype=np.float64)
+    baseline_hazard = baseline.iloc[:, 0].to_numpy(dtype=np.float64)
+    order = np.argsort(baseline_times)
+    baseline_times = baseline_times[order]
+    baseline_hazard = np.maximum.accumulate(np.clip(baseline_hazard[order], 0.0, 1e100))
+    if baseline_times.size == 0:
+        raise PHFitError("Cox PH fit produced an empty baseline cumulative hazard.")
+    beta = fitter.params_.reindex(feature_names).to_numpy(dtype=np.float64)
+    if not np.isfinite(beta).all():
+        raise PHFitError("Cox PH fit produced non-finite coefficients.")
+    if not np.isfinite(baseline_times).all() or not np.isfinite(baseline_hazard).all():
+        raise PHFitError("Cox PH fit produced a non-finite baseline cumulative hazard.")
+
+    return CoxPHEstimate(
+        beta=beta,
+        baseline_times=baseline_times,
+        baseline_cumulative_hazard=baseline_hazard,
+    )
+
+
+def cox_baseline_cumulative_hazard(grid: np.ndarray, estimate: CoxPHEstimate) -> np.ndarray:
+    """Evaluate the Breslow baseline cumulative hazard as a step function."""
+    grid = np.asarray(grid, dtype=np.float64)
+    indices = np.searchsorted(estimate.baseline_times, grid, side="right") - 1
+    h0 = np.zeros_like(grid, dtype=np.float64)
+    valid = indices >= 0
+    h0[valid] = estimate.baseline_cumulative_hazard[indices[valid]]
+    return np.maximum.accumulate(np.clip(h0, 0.0, 1e100))

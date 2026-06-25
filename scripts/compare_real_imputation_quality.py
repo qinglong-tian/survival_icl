@@ -40,10 +40,14 @@ from tabicl.survival._curves import (
     survival_median,
 )
 from tabicl.survival._parametric_ph import (
+    CoxPHEstimate,
     EPS,
     FAMILIES,
+    PHFitError,
     ParametricPHEstimate,
+    cox_baseline_cumulative_hazard,
     cumulative_hazard0,
+    fit_cox_ph_breslow,
     fit_parametric_ph_mle,
     ph_negative_log_likelihood,
     unpack_params as _unpack_params,
@@ -75,6 +79,7 @@ QUALITY_METRICS = [
     "early_median_fraction",
     "early_sample_fraction",
 ]
+RECOVERABLE_BENCHMARK_ERRORS = (ImportError, ValueError, PHFitError, np.linalg.LinAlgError)
 
 
 @dataclass(frozen=True)
@@ -95,10 +100,13 @@ class RealImputationQualityConfig:
     grid_size: int = 256
     n_imputation_samples: int = 100
     parametric_fit_families: tuple[str, ...] = ("weibull", "gompertz", "lognormal", "loglogistic")
+    parametric_l2_penalty: float = 1e-6
+    cox_penalizer: float = 1e-6
     checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH
     device: str = "cpu"
     query_batch_size: int = 64
     max_context_size: int | None = None
+    skip_cox_ph: bool = False
     skip_tabicl: bool = False
     include_conditional: bool = False
 
@@ -198,6 +206,7 @@ def impute_from_survival_curves(
     rng: np.random.Generator,
 ) -> ImputationOutput:
     """Convert survival curves into median and sampled imputations."""
+    curves = validate_survival_curves(method, curves)
     conditioned = condition_survival_curves(
         curves,
         grid,
@@ -214,6 +223,27 @@ def impute_from_survival_curves(
         n_samples=n_samples,
     )
     return ImputationOutput(method=method, mode=mode, median=medians, samples=samples)
+
+
+def validate_survival_curves(method: str, curves: np.ndarray) -> np.ndarray:
+    """Return clipped survival curves, raising on non-finite model output."""
+    curves = np.asarray(curves, dtype=np.float64)
+    if curves.ndim != 2 or curves.shape[0] == 0 or curves.shape[1] == 0:
+        raise ValueError(f"{method} produced survival curves with invalid shape {curves.shape}.")
+    if not np.isfinite(curves).all():
+        raise ValueError(f"{method} produced non-finite survival curves.")
+    return np.minimum.accumulate(np.clip(curves, 0.0, 1.0), axis=1)
+
+
+def benchmark_rng(seed: int, dataset_idx: int, trial: int, mode_idx: int, method_idx: int) -> np.random.Generator:
+    """Return an independent deterministic RNG stream for one benchmark method."""
+    return np.random.default_rng(
+        seed
+        + 100_003 * dataset_idx
+        + 1_000_003 * trial
+        + 10_007 * mode_idx
+        + 1009 * method_idx
+    )
 
 
 def km_imputation(
@@ -294,7 +324,7 @@ def choose_holdout_event_indices(
     min_context_events: int,
 ) -> np.ndarray:
     """Select observed-event rows to mask while leaving event context rows."""
-    event_indices = np.flatnonzero(np.asarray(event, dtype=np.float64) == 1.0)
+    event_indices = np.flatnonzero(np.asarray(event, dtype=np.float64) > 0.5)
     max_allowed = event_indices.size - min_context_events
     if max_allowed < min_holdout_events:
         return np.empty(0, dtype=np.int64)
@@ -339,7 +369,7 @@ def artificial_censor_times(
         if not np.isfinite(chosen):
             chosen = float(event_time * rng.uniform(fraction_low, fraction_high))
         censor_times[idx] = min(max(chosen, EPS), np.nextafter(event_time, 0.0))
-    return censor_times.astype(np.float32)
+    return censor_times
 
 
 def _mode_name(condition_on_censoring: bool) -> str:
@@ -366,10 +396,39 @@ def parametric_ph_real_imputation(
         eta = np.clip(np.asarray(X[holdout_indices], dtype=np.float64) @ estimate.beta, -20.0, 20.0)
         h0 = np.clip(cumulative_hazard0(grid, fit_family_key, estimate.baseline_params), EPS, 1e100)
         curves = np.exp(-np.exp(eta)[:, None] * h0[None, :])
-    curves = np.nan_to_num(curves, nan=0.0, posinf=0.0, neginf=1.0)
-    curves = np.minimum.accumulate(np.clip(curves, 0.0, 1.0), axis=1)
     return impute_from_survival_curves(
         method=f"{fit_family_key}_ph_mle",
+        mode=_mode_name(condition_on_censoring),
+        grid=grid,
+        curves=curves,
+        censor_times=t_obs[holdout_indices],
+        condition_on_censoring=condition_on_censoring,
+        n_samples=n_samples,
+        rng=rng,
+    )
+
+
+def cox_ph_real_imputation(
+    X: np.ndarray,
+    t_obs: np.ndarray,
+    delta: np.ndarray,
+    holdout_indices: np.ndarray,
+    grid: np.ndarray,
+    *,
+    condition_on_censoring: bool,
+    n_samples: int,
+    rng: np.random.Generator,
+    estimate: CoxPHEstimate | None = None,
+) -> ImputationOutput:
+    """Semi-parametric Cox PH imputation with Breslow baseline hazard."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        if estimate is None:
+            estimate = fit_cox_ph_breslow(X, t_obs, delta)
+        eta = np.clip(np.asarray(X[holdout_indices], dtype=np.float64) @ estimate.beta, -20.0, 20.0)
+        h0 = np.clip(cox_baseline_cumulative_hazard(grid, estimate), 0.0, 1e100)
+        curves = np.exp(-np.exp(eta)[:, None] * h0[None, :])
+    return impute_from_survival_curves(
+        method="cox_ph_breslow",
         mode=_mode_name(condition_on_censoring),
         grid=grid,
         curves=curves,
@@ -523,6 +582,10 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
         raise ValueError("grid_size must be at least 4.")
     if config.n_imputation_samples < 1:
         raise ValueError("n_imputation_samples must be positive.")
+    if config.parametric_l2_penalty < 0.0:
+        raise ValueError("parametric_l2_penalty must be non-negative.")
+    if config.cox_penalizer < 0.0:
+        raise ValueError("cox_penalizer must be non-negative.")
     for fit_family in config.parametric_fit_families:
         if fit_family not in FAMILIES:
             raise ValueError(f"Unsupported parametric fit family {fit_family!r}.")
@@ -542,8 +605,9 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
         )
         time = np.asarray(data.time, dtype=np.float64)
         event = np.asarray(data.event, dtype=np.float64)
-        natural_censored_count = int(np.sum(event == 0.0))
-        event_rate_original = float(event.mean())
+        event_observed = event > 0.5
+        natural_censored_count = int(np.sum(~event_observed))
+        event_rate_original = float(event_observed.mean())
         dataset_row_start = len(rows)
 
         for trial in range(config.n_trials):
@@ -563,19 +627,31 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
             truth = time[holdout_indices]
             artificial_censor = artificial_censor_times(
                 truth,
-                time[event == 0.0],
+                time[~event_observed],
                 rng,
                 strategy=config.artificial_censoring,
                 fraction_low=config.censor_fraction_low,
                 fraction_high=config.censor_fraction_high,
             )
             t_masked = time.copy()
-            delta_masked = event.copy()
+            delta_masked = event_observed.astype(np.float64)
             t_masked[holdout_indices] = artificial_censor
             delta_masked[holdout_indices] = 0.0
             grid = imputation_grid(t_masked, grid_size=config.grid_size)
             event_rate_masked = float(delta_masked.mean())
             context_event_count = int(delta_masked.sum())
+            cox_estimate: CoxPHEstimate | None = None
+            cox_failure: str | None = None
+            if not config.skip_cox_ph:
+                try:
+                    cox_estimate = fit_cox_ph_breslow(
+                        X,
+                        t_masked,
+                        delta_masked,
+                        penalizer=config.cox_penalizer,
+                    )
+                except RECOVERABLE_BENCHMARK_ERRORS as exc:
+                    cox_failure = str(exc)
             parametric_estimates: dict[str, ParametricPHEstimate] = {}
             parametric_failures: dict[str, str] = {}
             for fit_family in config.parametric_fit_families:
@@ -585,13 +661,13 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                         X,
                         t_masked,
                         delta_masked,
+                        l2_penalty=config.parametric_l2_penalty,
                     )
-                except Exception as exc:
+                except RECOVERABLE_BENCHMARK_ERRORS as exc:
                     parametric_failures[fit_family] = str(exc)
 
             for mode_idx, condition_on_censoring in enumerate(condition_modes):
                 mode = _mode_name(condition_on_censoring)
-                mode_rng = rng if mode_idx == 0 else np.random.default_rng(config.seed + 200_003 * dataset_idx + trial)
                 km_output = km_imputation(
                     t_masked,
                     delta_masked,
@@ -599,7 +675,7 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                     grid,
                     condition_on_censoring=condition_on_censoring,
                     n_samples=config.n_imputation_samples,
-                    rng=mode_rng,
+                    rng=benchmark_rng(config.seed, dataset_idx, trial, mode_idx, 0),
                 )
                 rows.append(
                     score_real_imputation(
@@ -616,7 +692,66 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                     )
                 )
 
-                for fit_family in config.parametric_fit_families:
+                if not config.skip_cox_ph:
+                    if cox_failure is not None:
+                        rows.append(
+                            failure_row(
+                                dataset=dataset,
+                                trial=trial,
+                                method="cox_ph_breslow",
+                                mode=mode,
+                                message=cox_failure,
+                                event_rate_original=event_rate_original,
+                                event_rate_masked=event_rate_masked,
+                                natural_censored_count=natural_censored_count,
+                                holdout_count=int(holdout_indices.size),
+                                context_event_count=context_event_count,
+                            )
+                        )
+                    else:
+                        try:
+                            output = cox_ph_real_imputation(
+                                X,
+                                t_masked,
+                                delta_masked,
+                                holdout_indices,
+                                grid,
+                                condition_on_censoring=condition_on_censoring,
+                                n_samples=config.n_imputation_samples,
+                                rng=benchmark_rng(config.seed, dataset_idx, trial, mode_idx, 1),
+                                estimate=cox_estimate,
+                            )
+                            rows.append(
+                                score_real_imputation(
+                                    output,
+                                    truth,
+                                    t_masked[holdout_indices],
+                                    dataset=dataset,
+                                    trial=trial,
+                                    event_rate_original=event_rate_original,
+                                    event_rate_masked=event_rate_masked,
+                                    natural_censored_count=natural_censored_count,
+                                    holdout_count=int(holdout_indices.size),
+                                    context_event_count=context_event_count,
+                                )
+                            )
+                        except RECOVERABLE_BENCHMARK_ERRORS as exc:
+                            rows.append(
+                                failure_row(
+                                    dataset=dataset,
+                                    trial=trial,
+                                    method="cox_ph_breslow",
+                                    mode=mode,
+                                    message=str(exc),
+                                    event_rate_original=event_rate_original,
+                                    event_rate_masked=event_rate_masked,
+                                    natural_censored_count=natural_censored_count,
+                                    holdout_count=int(holdout_indices.size),
+                                    context_event_count=context_event_count,
+                                )
+                            )
+
+                for fit_idx, fit_family in enumerate(config.parametric_fit_families):
                     failure_message = parametric_failures.get(fit_family)
                     if failure_message is not None:
                         rows.append(
@@ -634,32 +769,48 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                             )
                         )
                     else:
-                        output = parametric_ph_real_imputation(
-                            X,
-                            t_masked,
-                            delta_masked,
-                            holdout_indices,
-                            grid,
-                            fit_family_key=fit_family,
-                            condition_on_censoring=condition_on_censoring,
-                            n_samples=config.n_imputation_samples,
-                            rng=mode_rng,
-                            estimate=parametric_estimates[fit_family],
-                        )
-                        rows.append(
-                            score_real_imputation(
-                                output,
-                                truth,
-                                t_masked[holdout_indices],
-                                dataset=dataset,
-                                trial=trial,
-                                event_rate_original=event_rate_original,
-                                event_rate_masked=event_rate_masked,
-                                natural_censored_count=natural_censored_count,
-                                holdout_count=int(holdout_indices.size),
-                                context_event_count=context_event_count,
+                        try:
+                            output = parametric_ph_real_imputation(
+                                X,
+                                t_masked,
+                                delta_masked,
+                                holdout_indices,
+                                grid,
+                                fit_family_key=fit_family,
+                                condition_on_censoring=condition_on_censoring,
+                                n_samples=config.n_imputation_samples,
+                                rng=benchmark_rng(config.seed, dataset_idx, trial, mode_idx, 10 + fit_idx),
+                                estimate=parametric_estimates[fit_family],
                             )
-                        )
+                            rows.append(
+                                score_real_imputation(
+                                    output,
+                                    truth,
+                                    t_masked[holdout_indices],
+                                    dataset=dataset,
+                                    trial=trial,
+                                    event_rate_original=event_rate_original,
+                                    event_rate_masked=event_rate_masked,
+                                    natural_censored_count=natural_censored_count,
+                                    holdout_count=int(holdout_indices.size),
+                                    context_event_count=context_event_count,
+                                )
+                            )
+                        except RECOVERABLE_BENCHMARK_ERRORS as exc:
+                            rows.append(
+                                failure_row(
+                                    dataset=dataset,
+                                    trial=trial,
+                                    method=f"{fit_family}_ph_mle",
+                                    mode=mode,
+                                    message=str(exc),
+                                    event_rate_original=event_rate_original,
+                                    event_rate_masked=event_rate_masked,
+                                    natural_censored_count=natural_censored_count,
+                                    holdout_count=int(holdout_indices.size),
+                                    context_event_count=context_event_count,
+                                )
+                            )
 
             if not config.skip_tabicl:
                 try:
@@ -677,7 +828,7 @@ def run_real_imputation_quality_comparison(config: RealImputationQualityConfig) 
                         query_batch_size=config.query_batch_size,
                         max_context_size=config.max_context_size,
                     )
-                except Exception as exc:
+                except RECOVERABLE_BENCHMARK_ERRORS as exc:
                     for condition_on_censoring in condition_modes:
                         rows.append(
                             failure_row(
@@ -778,10 +929,13 @@ def main() -> None:
         default="weibull,gompertz,lognormal,loglogistic",
         help="Comma-separated PH baseline families fitted by conventional MLE.",
     )
+    parser.add_argument("--parametric-l2-penalty", type=float, default=1e-6)
+    parser.add_argument("--cox-penalizer", type=float, default=1e-6)
     parser.add_argument("--checkpoint-path", type=Path, default=DEFAULT_CHECKPOINT_PATH)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--query-batch-size", type=int, default=64)
     parser.add_argument("--max-context-size", type=int, default=None)
+    parser.add_argument("--skip-cox-ph", action="store_true")
     parser.add_argument("--skip-tabicl", action="store_true")
     parser.add_argument(
         "--include-conditional", action="store_true",
@@ -806,10 +960,13 @@ def main() -> None:
         grid_size=args.grid_size,
         n_imputation_samples=args.n_imputation_samples,
         parametric_fit_families=_csv_tuple(args.parametric_fit_families),
+        parametric_l2_penalty=args.parametric_l2_penalty,
+        cox_penalizer=args.cox_penalizer,
         checkpoint_path=args.checkpoint_path,
         device=args.device,
         query_batch_size=args.query_batch_size,
         max_context_size=args.max_context_size,
+        skip_cox_ph=args.skip_cox_ph,
         skip_tabicl=args.skip_tabicl,
         include_conditional=args.include_conditional,
     )
